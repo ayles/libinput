@@ -47,6 +47,7 @@ stages:
   - container_prep   # rebuild the container images if there is a change
   - build            # for actually building and testing things in a container
   - VM               # for running the test suite in a VM
+  - valgrind         # for running the test suite under valgrind in a VM
   - distro           # distribs test
   - deploy           # trigger wayland's website generation
   - container_clean  # clean up unused container images
@@ -62,7 +63,7 @@ variables:
   # See the documentation here:                                                 #
   # https://wayland.freedesktop.org/libinput/doc/latest/building_libinput.html  #
   ###############################################################################
-  FEDORA_RPMS:        'git gcc gcc-c++ pkgconf-pkg-config meson check-devel libudev-devel libevdev-devel doxygen graphviz python3-sphinx python3-recommonmark python3-sphinx_rtd_theme libwacom-devel cairo-devel   gtk3-devel   glib2-devel    mtdev-devel'
+  FEDORA_RPMS:        'git gcc gcc-c++ pkgconf-pkg-config meson check-devel libudev-devel libevdev-devel doxygen graphviz python3-sphinx python3-recommonmark python3-sphinx_rtd_theme libwacom-devel cairo-devel   gtk3-devel   glib2-devel    mtdev-devel diffutils'
   FEDORA_QEMU_RPMS:   'git gcc gcc-c++ pkgconf-pkg-config meson check-devel libudev-devel libevdev-devel doxygen graphviz python3-sphinx python3-recommonmark python3-sphinx_rtd_theme libwacom-devel cairo-devel   gtk3-devel   glib2-devel    mtdev-devel diffutils valgrind'
   UBUNTU_CUSTOM_DEBS: 'git gcc g++     pkg-config         meson check       libudev-dev   libevdev-dev   doxygen graphviz python3-sphinx python3-recommonmark python3-sphinx-rtd-theme libwacom-dev   libcairo2-dev libgtk-3-dev libglib2.0-dev libmtdev-dev'
   ARCH_PKGS:          'git gcc         pkgconfig          meson check       libsystemd    libevdev       doxygen graphviz  python-sphinx  python-recommonmark python-sphinx_rtd_theme  libwacom                     gtk3                        mtdev      diffutils'
@@ -75,7 +76,7 @@ variables:
   # changing these will force rebuilding the associated image
   # Note: these tags have no meaning and are not tied to a particular
   # libinput version
-  FEDORA_TAG: '2019-10-25.0'
+  FEDORA_TAG: '2019-11-04.0'
   UBUNTU_TAG: '2019-08-07.0'
   ARCH_TAG: '2019-08-07.0'
   ALPINE_TAG: '2019-10-15.5'
@@ -113,11 +114,11 @@ variables:
 # The default build instructions
 .default_build: &default_build
   script:
-   - rm -rf "$MESON_BUILDDIR"
-   - meson "$MESON_BUILDDIR" $MESON_ARGS
-   - meson configure "$MESON_BUILDDIR"
-   - ninja -C "$MESON_BUILDDIR" $NINJA_ARGS
-   - if test x"$MESON_TEST_ARGS" != "x"; then echo "Running meson test -C \"$MESON_BUILDDIR\" $MESON_TEST_ARGS"; meson test -C "$MESON_BUILDDIR" $MESON_TEST_ARGS; fi
+    - rm -rf "$MESON_BUILDDIR"
+    - meson "$MESON_BUILDDIR" $MESON_ARGS
+    - meson configure "$MESON_BUILDDIR"
+    - ninja -C "$MESON_BUILDDIR" $NINJA_ARGS
+    - if test x"$MESON_TEST_ARGS" != "x"; then echo "Running meson test -C \"$MESON_BUILDDIR\" $MESON_TEST_ARGS"; meson test -C "$MESON_BUILDDIR" $MESON_TEST_ARGS; fi
 
 #################################################################
 #                                                               #
@@ -138,17 +139,14 @@ variables:
     # get the full container image name (DISTRIB_VERSION still has indirections)
     - IMAGE=$(eval echo "$DISTRIB_FLAVOR/$DISTRIB_VERSION:$TAG")
 
-    - |
-      # force rebuild if schedule, reuse otherwise
-      if [[ $CI_PIPELINE_SOURCE != "schedule" ]] ;
-      then
-        # pull the latest upstream image if it exists
-        skopeo copy docker://$CI_REGISTRY/$UPSTREAM_REPO/$IMAGE \
-                    docker://$CI_REGISTRY_IMAGE/$IMAGE && exit 0 || true ;
+    # force rebuild if schedule, reuse otherwise
+    - if [[ $CI_PIPELINE_SOURCE == "schedule" ]] ; then touch .scheduled; fi
+    # pull the latest upstream image if it exists
+    - test -e .scheduled || skopeo copy docker://$CI_REGISTRY/$UPSTREAM_REPO/$IMAGE
+                  docker://$CI_REGISTRY_IMAGE/$IMAGE && exit 0 || true ;
 
-        # check if our image is already in the current registry
-        skopeo inspect docker://$CI_REGISTRY_IMAGE/$IMAGE > /dev/null && exit 0 || true ;
-      fi
+    # check if our image is already in the current registry
+    - test -e .scheduled || skopeo inspect docker://$CI_REGISTRY_IMAGE/$IMAGE > /dev/null && exit 0 || true ;
 
 fedora:30@qemu-prep:
   extends: .fedora@qemu-build
@@ -163,6 +161,7 @@ fedora:30@qemu-prep:
     DISTRIB_FLAVOR: fedora
     DISTRIB_VERSION: $FEDORA_VERSION
     TAG: $QEMU_TAG
+  allow_failure: true
   <<: *pull_upstream_or_rebuild
 
 fedora:30@container-prep:
@@ -414,7 +413,11 @@ freebsd:11.2@container-clean:
     exit 1 ;
   fi
 
-fedora:30@test-suite-vm:
+# Run in a test suite. Special variables:
+# - SUITES: the meson test suites to run, or
+# - SUITE_NAMES: all elements will be expanded to libinput-test-suite-$value
+# Set one or the other, not both.
+.fedora:30@test-suite-vm:
   stage: VM
   image: $QEMU_CONTAINER_IMAGE
   tags:
@@ -422,6 +425,11 @@ fedora:30@test-suite-vm:
   variables:
     FEDORA_VERSION: 30
     MESON_BUILDDIR: build_dir
+    # remove the global --no-suite=hardware
+    MESON_TEST_ARGS: ''
+  before_script:
+    - if ! [[ -z $SUITE_NAMES ]]; then SUITES=$(echo $SUITE_NAMES | sed 's/\([^ ]*\)/libinput-test-suite-\1/g'); fi
+    - echo "Testing $SUITES"
   script:
     # start our vm, no args required
     - /app/start_vm.sh
@@ -433,7 +441,8 @@ fedora:30@test-suite-vm:
     - ssh localhost -p 5555 "cd $CI_PROJECT_NAME ; meson \"$MESON_BUILDDIR\" $MESON_ARGS"
     - ssh localhost -p 5555 "cd $CI_PROJECT_NAME ; meson configure \"$MESON_BUILDDIR\" "
     - ssh localhost -p 5555 "cd $CI_PROJECT_NAME ; ninja -C \"$MESON_BUILDDIR\" $NINJA_ARGS"
-    - ssh localhost -p 5555 "cd $CI_PROJECT_NAME ; meson test -C \"$MESON_BUILDDIR\" $MESON_TEST_ARGS --print-errorlogs" && touch .success || true
+    - echo "meson test -C \"$MESON_BUILDDIR\" $MESON_TEST_ARGS $SUITES --print-errorlogs"
+    - ssh localhost -p 5555 "cd $CI_PROJECT_NAME ; meson test -C \"$MESON_BUILDDIR\" $MESON_TEST_ARGS --print-errorlogs $SUITES" && touch .success || true
 
     # no matter the results of the tests, we want to fetch the logs
     - scp -P 5555 -r localhost:$CI_PROJECT_NAME/$MESON_BUILDDIR .
@@ -464,10 +473,74 @@ fedora:30@test-suite-vm:
   allow_failure: true
   needs: ['fedora:30@qemu-prep']
 
-fedora:30@test-suite-vm-valgrind:
-  extends: fedora:30@test-suite-vm
+
+# in reverse order of duration to get the slowest ones started first
+fedora:30@vm-touchpad:
+  extends: .fedora:30@test-suite-vm
   variables:
-    MESON_TEST_ARGS: '--suite=valgrind --setup=valgrind'
+    SUITE_NAMES: 'touchpad'
+
+fedora:30@vm-tap:
+  extends: .fedora:30@test-suite-vm
+  variables:
+    SUITE_NAMES: 'tap'
+
+fedora:30@vm-tablet:
+  extends: .fedora:30@test-suite-vm
+  variables:
+    SUITE_NAMES: 'tablet'
+
+fedora:30@vm-gestures-device:
+  extends: .fedora:30@test-suite-vm
+  variables:
+    SUITE_NAMES: 'gestures device'
+
+fedora:30@vm-others:
+  extends: .fedora:30@test-suite-vm
+  variables:
+    SUITE_NAMES: 'context config misc events totem udev lid log timer tablet-mode quirks trackball pad path keyboard switch touch trackpoint'
+
+fedora:30@vm-pointer:
+  extends: .fedora:30@test-suite-vm
+  variables:
+    SUITE_NAMES: 'pointer'
+
+fedora:30@valgrind-touchpad:
+  stage: valgrind
+  extends: fedora:30@vm-touchpad
+  variables:
+    MESON_TEST_ARGS: '--setup=valgrind'
+
+fedora:30@valgrind-tap:
+  stage: valgrind
+  extends: fedora:30@vm-tap
+  variables:
+    MESON_TEST_ARGS: '--setup=valgrind'
+
+fedora:30@valgrind-tablet:
+  stage: valgrind
+  extends: fedora:30@vm-tablet
+  variables:
+    MESON_TEST_ARGS: '--setup=valgrind'
+
+fedora:30@valgrind-gestures-device:
+  stage: valgrind
+  extends: fedora:30@vm-gestures-device
+  variables:
+    MESON_TEST_ARGS: '--setup=valgrind'
+
+
+fedora:30@valgrind-others:
+  stage: valgrind
+  extends: fedora:30@vm-others
+  variables:
+    MESON_TEST_ARGS: '--setup=valgrind'
+
+fedora:30@valgrind-pointer:
+  stage: valgrind
+  extends: fedora:30@vm-pointer
+  variables:
+    MESON_TEST_ARGS: '--setup=valgrind'
 
 .fedora-build@template:
   extends: .build@template
