@@ -714,10 +714,10 @@ libinput_event_pointer_get_axis_value(struct libinput_event_pointer *event,
 	} else {
 		switch (axis) {
 		case LIBINPUT_POINTER_AXIS_SCROLL_HORIZONTAL:
-			value = event->delta.x * 0.4;
+			value = event->delta.x * 0.5;
 			break;
 		case LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL:
-			value = event->delta.y * 0.4;
+			value = event->delta.y * 0.5;
 			break;
 		}
 	}
