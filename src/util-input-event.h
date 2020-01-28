@@ -1,7 +1,5 @@
 /*
- * Copyright © 2008-2011 Kristian Høgsberg
- * Copyright © 2011 Intel Corporation
- * Copyright © 2013-2015 Red Hat, Inc.
+ * Copyright © 2019 Red Hat, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -27,33 +25,45 @@
 
 #include "config.h"
 
-#define ARRAY_LENGTH(a) (sizeof (a) / sizeof (a)[0])
-#define ARRAY_FOR_EACH(_arr, _elem) \
-	for (size_t _i = 0; _i < ARRAY_LENGTH(_arr) && (_elem = &_arr[_i]); _i++)
+#include "util-time.h"
+#include <linux/input.h>
 
-#define min(a, b) (((a) < (b)) ? (a) : (b))
-#define max(a, b) (((a) > (b)) ? (a) : (b))
+static inline struct input_event
+input_event_init(uint64_t time,
+		 unsigned int type,
+		 unsigned int code,
+		 int value)
+{
+	struct input_event ev;
+	struct timeval tval = us2tv(time);
 
-#define ANSI_HIGHLIGHT		"\x1B[0;1;39m"
-#define ANSI_RED		"\x1B[0;31m"
-#define ANSI_GREEN		"\x1B[0;32m"
-#define ANSI_YELLOW		"\x1B[0;33m"
-#define ANSI_BLUE		"\x1B[0;34m"
-#define ANSI_MAGENTA		"\x1B[0;35m"
-#define ANSI_CYAN		"\x1B[0;36m"
-#define ANSI_BRIGHT_RED		"\x1B[0;31;1m"
-#define ANSI_BRIGHT_GREEN	"\x1B[0;32;1m"
-#define ANSI_BRIGHT_YELLOW	"\x1B[0;33;1m"
-#define ANSI_BRIGHT_BLUE	"\x1B[0;34;1m"
-#define ANSI_BRIGHT_MAGENTA	"\x1B[0;35;1m"
-#define ANSI_BRIGHT_CYAN	"\x1B[0;36;1m"
-#define ANSI_NORMAL		"\x1B[0m"
+	ev.input_event_sec = tval.tv_sec;
+	ev.input_event_usec = tval.tv_usec;
+	ev.type = type;
+	ev.code = code;
+	ev.value = value;
+
+	return ev;
+}
+
+static inline uint64_t
+input_event_time(const struct input_event *e)
+{
+	struct timeval tval;
+
+	tval.tv_sec = e->input_event_sec;
+	tval.tv_usec = e->input_event_usec;
+
+	return tv2us(&tval);
+}
 
 
-#define ANSI_UP			"\x1B[%dA"
-#define ANSI_DOWN		"\x1B[%dB"
-#define ANSI_RIGHT		"\x1B[%dC"
-#define ANSI_LEFT		"\x1B[%dD"
+static inline void
+input_event_set_time(struct input_event *e,
+		     uint64_t time)
+{
+	struct timeval tval = us2tv(time);
 
-
-#define CASE_RETURN_STRING(a) case a: return #a
+	e->input_event_sec = tval.tv_sec;
+	e->input_event_usec = tval.tv_usec;
+}

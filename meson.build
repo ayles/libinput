@@ -1,5 +1,5 @@
 project('libinput', 'c',
-	version : '1.14.900',
+	version : '1.15.0',
 	license : 'MIT/Expat',
 	default_options : [ 'c_std=gnu99', 'warning_level=2' ],
 	meson_version : '>= 0.41.0')
@@ -43,7 +43,7 @@ libinput_so_version = '@0@.@1@.@2@'.format((libinput_lt_c - libinput_lt_a),
 
 # Compiler setup
 cc = meson.get_compiler('c')
-cppflags = ['-Wno-unused-parameter', '-g', '-fvisibility=hidden']
+cppflags = ['-Wno-unused-parameter', '-fvisibility=hidden']
 cflags = cppflags + ['-Wmissing-prototypes', '-Wstrict-prototypes']
 add_project_arguments(cflags, language : 'c')
 add_project_arguments(cppflags, language : 'cpp')
@@ -53,9 +53,9 @@ config_h = configuration_data()
 
 doc_url_base = 'https://wayland.freedesktop.org/libinput/doc'
 if libinput_version[2].to_int() >= 90
-	doc_url = '@0@/latest'.format(doc_url_base)
+	doc_url = '@0@/latest/'.format(doc_url_base)
 else
-	doc_url = '@0@/@1@'.format(doc_url_base, meson.project_version())
+	doc_url = '@0@/@1@/'.format(doc_url_base, meson.project_version())
 endif
 config_h.set_quoted('HTTP_DOC_LINK', doc_url)
 
@@ -240,6 +240,7 @@ endif
 # necessary bits.
 util_headers = [
 		'util-bits.h',
+		'util-input-event.h',
 		'util-list.h',
 		'util-macros.h',
 		'util-matrix.h',
@@ -317,6 +318,7 @@ quirks_data = [
 	'quirks/30-vendor-ibm.quirks',
 	'quirks/30-vendor-kensington.quirks',
 	'quirks/30-vendor-logitech.quirks',
+	'quirks/30-vendor-madcatz.quirks',
 	'quirks/30-vendor-microsoft.quirks',
 	'quirks/30-vendor-razer.quirks',
 	'quirks/30-vendor-synaptics.quirks',
@@ -481,7 +483,10 @@ man_config.set('LIBINPUT_VERSION', meson.project_version())
 man_config.set('LIBINPUT_DATA_DIR', dir_data)
 
 deps_tools = [ dep_tools_shared, dep_libinput ]
-libinput_debug_events_sources = [ 'tools/libinput-debug-events.c' ]
+libinput_debug_events_sources = [
+	'tools/libinput-debug-events.c',
+	libinput_version_h,
+]
 executable('libinput-debug-events',
 	   libinput_debug_events_sources,
 	   dependencies : deps_tools,
@@ -491,6 +496,20 @@ executable('libinput-debug-events',
 	   )
 configure_file(input : 'tools/libinput-debug-events.man',
 	       output : 'libinput-debug-events.1',
+	       configuration : man_config,
+	       install_dir : dir_man1,
+	       )
+
+libinput_debug_tablet_sources = [ 'tools/libinput-debug-tablet.c' ]
+executable('libinput-debug-tablet',
+	   libinput_debug_tablet_sources,
+	   dependencies : deps_tools,
+	   include_directories : [includes_src, includes_include],
+	   install_dir : libinput_tool_path,
+	   install : true)
+
+configure_file(input : 'tools/libinput-debug-tablet.man',
+	       output : 'libinput-debug-tablet.1',
 	       configuration : man_config,
 	       install_dir : dir_man1,
 	       )
@@ -946,7 +965,8 @@ if get_option('tests')
 		test('libinput-test-suite-@0@'.format(group),
 		     libinput_test_runner,
 		     suite : ['all', 'valgrind', 'root', 'hardware'],
-		     args : ['--filter-group=@0@:*'.format(group)],
+		     args : ['--filter-group=@0@:*'.format(group),
+			     '--xml-output=junit-@0@-XXXXXX.xml'.format(group)],
 		     is_parallel : false,
 		     timeout : 1200)
         endforeach
@@ -954,7 +974,8 @@ if get_option('tests')
 	test('libinput-test-deviceless',
 	     libinput_test_runner,
 	     suite : ['all', 'valgrind'],
-	     args: ['--filter-deviceless'])
+	     args: ['--filter-deviceless',
+	            '--xml-output=junit-deviceless-XXXXXX.xml'])
 
 	valgrind = find_program('valgrind', required : false)
 	if valgrind.found()
