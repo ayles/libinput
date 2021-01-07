@@ -81,7 +81,7 @@ strv_from_string(const char *in, const char *separators)
 	assert(in != NULL);
 
 	s = in;
-	while ((word = next_word(&s, &l, separators)) != NULL)
+	while (next_word(&s, &l, separators) != NULL)
 	       nelems++;
 
 	if (nelems == 0)
@@ -115,7 +115,7 @@ strv_from_string(const char *in, const char *separators)
  * An empty strv ([NULL]) returns NULL, same for passing NULL as either
  * argument.
  *
- * @param strv Input string arrray
+ * @param strv Input string array
  * @param joiner Joiner between the elements in the final string
  *
  * @return A null-terminated string joining all elements

@@ -88,10 +88,10 @@ totem_new_tool(struct totem_dispatch *totem)
 		.refcount = 1,
 	};
 
-	tool->pressure_offset = 0;
-	tool->has_pressure_offset = false;
-	tool->pressure_threshold.lower = 0;
-	tool->pressure_threshold.upper = 1;
+	tool->pressure.offset = 0;
+	tool->pressure.has_offset = false;
+	tool->pressure.threshold.lower = 0;
+	tool->pressure.threshold.upper = 1;
 
 	set_bit(tool->axis_caps, LIBINPUT_TABLET_TOOL_AXIS_X);
 	set_bit(tool->axis_caps, LIBINPUT_TABLET_TOOL_AXIS_Y);
@@ -181,6 +181,10 @@ totem_process_key(struct totem_dispatch *totem,
 		  struct input_event *e,
 		  uint64_t time)
 {
+	/* ignore kernel key repeat */
+	if (e->value == 2)
+		return;
+
 	switch(e->code) {
 	case BTN_0:
 		totem->button_state_now = !!e->value;

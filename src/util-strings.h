@@ -111,6 +111,18 @@ xasprintf(char **strp, const char *fmt, ...)
 	return rc;
 }
 
+__attribute__ ((format (printf, 2, 0)))
+static inline int
+xvasprintf(char **strp, const char *fmt, va_list args)
+{
+	int rc = 0;
+	rc = vasprintf(strp, fmt, args);
+	if ((rc == -1) && strp)
+		*strp = NULL;
+
+	return rc;
+}
+
 static inline bool
 safe_atoi_base(const char *str, int *val, int base)
 {
@@ -225,8 +237,8 @@ safe_atod(const char *str, double *val)
 	return true;
 }
 
-char **strv_from_string(const char *string, const char *separator);
-char *strv_join(char **strv, const char *separator);
+char **strv_from_string(const char *in, const char *separator);
+char *strv_join(char **strv, const char *joiner);
 
 static inline void
 strv_free(char **strv) {
@@ -311,4 +323,56 @@ error:
 	strv_free(pairs);
 	free(result);
 	return -1;
+}
+
+/**
+ * Strip any of the characters in what from the beginning and end of the
+ * input string.
+ *
+ * @return a newly allocated string with none of "what" at the beginning or
+ * end of string
+ */
+static inline char *
+strstrip(const char *input, const char *what)
+{
+	char *str, *last;
+
+	str = safe_strdup(&input[strspn(input, what)]);
+
+	last = str;
+
+	for (char *c = str; *c != '\0'; c++) {
+		if (!strchr(what, *c))
+			last = c + 1;
+	}
+
+	*last = '\0';
+
+	return str;
+}
+
+/**
+ * Return true if str ends in suffix, false otherwise. If the suffix is the
+ * empty string, strendswith() always returns false.
+ */
+static inline bool
+strendswith(const char *str, const char *suffix)
+{
+	size_t slen = strlen(str);
+	size_t suffixlen = strlen(suffix);
+	size_t offset;
+
+	if (slen == 0 || suffixlen == 0 || suffixlen > slen)
+		return false;
+
+	offset = slen - suffixlen;
+	return strneq(&str[offset], suffix, suffixlen);
+}
+
+static inline bool
+strstartswith(const char *str, const char *prefix)
+{
+	size_t prefixlen = strlen(prefix);
+
+	return prefixlen > 0 ? strneq(str, prefix, strlen(prefix)) : false;
 }

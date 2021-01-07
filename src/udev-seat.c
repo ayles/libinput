@@ -41,6 +41,38 @@ udev_seat_create(struct udev_input *input,
 static struct udev_seat *
 udev_seat_get_named(struct udev_input *input, const char *seat_name);
 
+
+static inline bool
+filter_duplicates(struct udev_seat *udev_seat,
+		  struct udev_device *udev_device)
+{
+	struct libinput_device *device;
+	const char *new_syspath = udev_device_get_syspath(udev_device);
+	bool ignore_device = false;
+
+	if (!udev_seat)
+		return false;
+
+	list_for_each(device, &udev_seat->base.devices_list, link) {
+		const char *syspath;
+		struct udev_device *ud;
+
+		ud = libinput_device_get_udev_device(device);
+		if (!ud)
+			continue;
+
+		syspath = udev_device_get_syspath(ud);
+		if (syspath && new_syspath && streq(syspath, new_syspath))
+			ignore_device = true;
+		udev_device_unref(ud);
+
+		if (ignore_device)
+			break;
+	}
+
+	return ignore_device;
+}
+
 static int
 device_added(struct udev_device *udev_device,
 	     struct udev_input *input,
@@ -72,6 +104,13 @@ device_added(struct udev_device *udev_device,
 
 	seat = udev_seat_get_named(input, seat_name);
 
+	/* There is a race at startup: a device added between setting
+	 * up the udev monitor and enumerating all current devices may show
+	 * up in both lists. Filter those out.
+	 */
+	if (filter_duplicates(seat, udev_device))
+		return 0;
+
 	if (seat)
 		libinput_seat_ref(&seat->base);
 	else {
@@ -89,7 +128,9 @@ device_added(struct udev_device *udev_device,
 			 sysname,
 			 devnode);
 		return 0;
-	} else if (device == NULL) {
+	}
+
+	if (device == NULL) {
 		log_info(&input->base,
 			 "%-7s - failed to create input device '%s'\n",
 			 sysname,
@@ -248,8 +289,11 @@ udev_input_enable(struct libinput *libinput)
 		return -1;
 	}
 
-	udev_monitor_filter_add_match_subsystem_devtype(input->udev_monitor,
-			"input", NULL);
+	if (udev_monitor_filter_add_match_subsystem_devtype(
+				input->udev_monitor, "input", NULL)) {
+		log_info(libinput, "udev: failed to set up filter\n");
+		return -1;
+	}
 
 	if (udev_monitor_enable_receiving(input->udev_monitor)) {
 		log_info(libinput, "udev: failed to bind the udev monitor\n");

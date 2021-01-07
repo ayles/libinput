@@ -65,8 +65,9 @@
 
 #include <linux/kd.h>
 
+#define evbit(t, c) ((t) << 16U | (c & 0xffff))
+
 #define UDEV_RULES_D "/run/udev/rules.d"
-#define UDEV_RULE_PREFIX "99-litest-"
 #define UDEV_FUZZ_OVERRIDE_RULE_FILE UDEV_RULES_D \
 	"/91-litest-fuzz-override-REMOVEME-XXXXXX.rules"
 #define UDEV_TEST_DEVICE_RULE_FILE UDEV_RULES_D \
@@ -264,6 +265,49 @@ struct litest_device *litest_current_device(void)
 	return current_device;
 }
 
+static void
+grab_device(struct litest_device *device, bool mode)
+{
+	struct libinput *li = libinput_device_get_context(device->libinput_device);
+	struct litest_context *ctx = libinput_get_user_data(li);
+	struct udev_device *udev_device;
+	const char *devnode;
+	struct path *p;
+
+	udev_device = libinput_device_get_udev_device(device->libinput_device);
+	litest_assert_ptr_notnull(udev_device);
+
+	devnode = udev_device_get_devnode(udev_device);
+
+	/* Note: in some tests we create multiple devices for the same path.
+	 * This will only grab the first device in the list but we're using
+	 * list_insert() so the first device is the latest that was
+	 * initialized, so we should be good.
+	 */
+	list_for_each(p, &ctx->paths, link) {
+		if (streq(p->path, devnode)) {
+			int rc = ioctl(p->fd, EVIOCGRAB, (void*)mode ? 1 : 0);
+			ck_assert_int_gt(rc, -1);
+			udev_device_unref(udev_device);
+			return;
+		}
+	}
+	litest_abort_msg("Failed to find device %s to %sgrab\n",
+			 devnode, mode ? "" : "un");
+}
+
+void
+litest_grab_device(struct litest_device *device)
+{
+	grab_device(device, true);
+}
+
+void
+litest_ungrab_device(struct litest_device *device)
+{
+	grab_device(device, false);
+}
+
 void litest_set_current_device(struct litest_device *device)
 {
 	current_device = device;
@@ -397,7 +441,7 @@ get_suite(const char *name)
 	bool found = false;
 
 	ARRAY_FOR_EACH(allowed_suites, allowed) {
-		if (strneq(name, *allowed, strlen(*allowed))) {
+		if (strstartswith(name, *allowed)) {
 			found = true;
 			break;
 		}
@@ -678,9 +722,14 @@ litest_log_handler(struct libinput *libinput,
 		/* valgrind is too slow and some of our offsets are too
 		 * short, don't abort if during a valgrind run we get a
 		 * negative offset */
-		if ((!RUNNING_ON_VALGRIND && !in_debugger) ||
-		    !strstr(format, "offset negative"))
-		litest_abort_msg("libinput bug triggered, aborting.\n");
+		if ((RUNNING_ON_VALGRIND && in_debugger) ||
+		    !strstr(format, "scheduled expiry is in the past")) {
+			/* noop */
+		} else if (!strstr(format, "event processing lagging behind")) {
+			/* noop */
+		} else {
+			litest_abort_msg("libinput bug triggered, aborting.\n");
+		}
 	}
 
 	if (strstr(format, "Touch jump detected and discarded")) {
@@ -693,6 +742,7 @@ litest_init_device_udev_rules(struct litest_test_device *dev, FILE *f)
 {
 	const struct key_value_str *kv;
 	static int count;
+	bool need_keyboard_builtin = false;
 
 	if (dev->udev_properties[0].key == NULL)
 		return;
@@ -708,10 +758,27 @@ litest_init_device_udev_rules(struct litest_test_device *dev, FILE *f)
 	kv = dev->udev_properties;
 	while (kv->key) {
 		fprintf(f, ", \\\n\tENV{%s}=\"%s\"", kv->key, kv->value);
+		if (strneq(kv->key, "EVDEV_ABS_", 10))
+			need_keyboard_builtin = true;
 		kv++;
 	}
-
 	fprintf(f, "\n");
+
+	/* Special case: the udev keyboard builtin is only run for hwdb
+	 * matches but we don't set any up in litest. So instead scan the
+	 * device's udev properties for any EVDEV_ABS properties and where
+	 * they exist, force a (re-)run of the keyboard builtin to set up
+	 * the evdev device correctly.
+	 * This needs to be done as separate rule apparently, otherwise the
+	 * ENV variables aren't set yet by the time the builtin runs.
+	 */
+	if (need_keyboard_builtin) {
+		fprintf(f, ""
+			"ATTRS{name}==\"litest %s*\","
+			" IMPORT{builtin}=\"keyboard\"\n",
+			dev->name);
+	}
+
 	fprintf(f, "LABEL=\"rule%d_end\"\n\n", count);;
 }
 
@@ -726,9 +793,8 @@ litest_init_all_device_udev_rules(struct list *created_files)
 	int fd;
 
 	rc = xasprintf(&path,
-		      "%s/%s-XXXXXX.rules",
-		      UDEV_RULES_D,
-		      UDEV_RULE_PREFIX);
+		      "%s/99-litest-XXXXXX.rules",
+		      UDEV_RULES_D);
 	litest_assert_int_gt(rc, 0);
 
 	fd = mkstemps(path, 6);
@@ -748,13 +814,47 @@ litest_init_all_device_udev_rules(struct list *created_files)
 static int
 open_restricted(const char *path, int flags, void *userdata)
 {
-	int fd = open(path, flags);
-	return fd < 0 ? -errno : fd;
+	const char prefix[] = "/dev/input/event";
+	struct litest_context *ctx = userdata;
+	struct path *p;
+	int fd;
+
+	litest_assert_ptr_notnull(ctx);
+
+	fd = open(path, flags);
+	if (fd < 0)
+		return -errno;
+
+	if (strneq(path, prefix, strlen(prefix))) {
+		p = zalloc(sizeof *p);
+		p->path = safe_strdup(path);
+		p->fd = fd;
+		/* We specifically insert here so that the most-recently
+		 * opened path is the first one in the list. This helps when
+		 * we have multiple test devices with the same device path,
+		 * the fd of the most recent device is the first one to get
+		 * grabbed
+		 */
+		list_insert(&ctx->paths, &p->link);
+	}
+
+	return fd;
 }
 
 static void
 close_restricted(int fd, void *userdata)
 {
+	struct litest_context *ctx = userdata;
+	struct path *p, *tmp;
+
+	list_for_each_safe(p, tmp, &ctx->paths, link) {
+		if (p->fd != fd)
+			continue;
+		list_remove(&p->link);
+		free(p->path);
+		free(p);
+	}
+
 	close(fd);
 }
 
@@ -1113,7 +1213,7 @@ inhibit(void)
 				&error,
 				&m,
 				"ssss",
-				"handle-lid-switch:handle-power-key:handle-suspend-key:handle-hibernate-key",
+				"sleep:shutdown:handle-lid-switch:handle-power-key:handle-suspend-key:handle-hibernate-key",
 				"libinput test-suite runner",
 				"testing in progress",
 				"block");
@@ -1326,7 +1426,7 @@ litest_install_model_quirks(struct list *created_files_list)
 				false);
 	list_insert(created_files_list, &file->link);
 
-	/* Ony install the litest device rule when we're running as system
+	/* Only install the litest device rule when we're running as system
 	 * test suite, we expect the others to be in place already */
 	if (use_system_rules_quirks)
 		return;
@@ -1371,6 +1471,10 @@ litest_init_device_quirk_file(const char *data_dir,
 	return safe_strdup(path);
 }
 
+static int is_quirks_file(const struct dirent *dir) {
+	return strendswith(dir->d_name, ".quirks");
+}
+
 /**
  * Install the quirks from the quirks/ source directory.
  */
@@ -1378,30 +1482,30 @@ static void
 litest_install_source_quirks(struct list *created_files_list,
 			     const char *dirname)
 {
-	const char *quirksdir = "quirks/";
-	char **quirks, **q;
+	struct dirent **namelist;
+	int ndev;
 
-	quirks = strv_from_string(LIBINPUT_QUIRKS_FILES, ":");
-	litest_assert(quirks);
+	ndev = scandir(LIBINPUT_QUIRKS_SRCDIR,
+		       &namelist,
+		       is_quirks_file,
+		       versionsort);
+	litest_assert_int_ge(ndev, 0);
 
-	q = quirks;
-	while (*q) {
+	for (int idx = 0; idx < ndev; idx++) {
 		struct created_file *file;
 		char *filename;
 		char dest[PATH_MAX];
 		char src[PATH_MAX];
 
-		litest_assert(strneq(*q, quirksdir, strlen(quirksdir)));
-		filename = &(*q)[strlen(quirksdir)];
-
+		filename = namelist[idx]->d_name;
 		snprintf(src, sizeof(src), "%s/%s",
 			 LIBINPUT_QUIRKS_SRCDIR, filename);
 		snprintf(dest, sizeof(dest), "%s/%s", dirname, filename);
 		file = litest_copy_file(dest, src, NULL, true);
 		list_append(created_files_list, &file->link);
-		q++;
+		free(namelist[idx]);
 	}
-	strv_free(quirks);
+	free(namelist);
 }
 
 /**
@@ -1595,8 +1699,13 @@ litest_create(enum litest_device_type which,
 struct libinput *
 litest_create_context(void)
 {
-	struct libinput *libinput =
-		libinput_path_create_context(&interface, NULL);
+	struct libinput *libinput;
+	struct litest_context *ctx;
+
+	ctx = zalloc(sizeof *ctx);
+	list_init(&ctx->paths);
+
+	libinput = libinput_path_create_context(&interface, ctx);
 	litest_assert_notnull(libinput);
 
 	libinput_log_set_handler(libinput, litest_log_handler);
@@ -1604,6 +1713,23 @@ litest_create_context(void)
 		libinput_log_set_priority(libinput, LIBINPUT_LOG_PRIORITY_DEBUG);
 
 	return libinput;
+}
+
+void
+litest_destroy_context(struct libinput *li)
+{
+	struct path *p, *tmp;
+	struct litest_context *ctx;
+
+
+	ctx = libinput_get_user_data(li);
+	litest_assert_ptr_notnull(ctx);
+	libinput_unref(li);
+
+	list_for_each_safe(p, tmp, &ctx->paths, link) {
+		litest_abort_msg("Device paths should be removed by now");
+	}
+	free(ctx);
 }
 
 void
@@ -1688,6 +1814,7 @@ litest_add_device_with_overrides(struct libinput *libinput,
 			d->interface->min[ABS_Y] = libevdev_get_abs_minimum(d->evdev, code);
 			d->interface->max[ABS_Y] = libevdev_get_abs_maximum(d->evdev, code);
 		}
+		d->interface->tool_type = BTN_TOOL_PEN;
 	}
 	return d;
 }
@@ -1768,15 +1895,13 @@ udev_wait_for_device_event(struct udev_monitor *udev_monitor,
 		udev_device = udev_monitor_receive_device(udev_monitor);
 		litest_assert_notnull(udev_device);
 		udev_action = udev_device_get_action(udev_device);
-		if (!streq(udev_action, udev_event)) {
+		if (!udev_action || !streq(udev_action, udev_event)) {
 			udev_device_unref(udev_device);
 			continue;
 		}
 
 		udev_syspath = udev_device_get_syspath(udev_device);
-		if (udev_syspath && strneq(udev_syspath,
-					   syspath,
-					   strlen(syspath)))
+		if (udev_syspath && strstartswith(udev_syspath, syspath))
 			break;
 
 		udev_device_unref(udev_device);
@@ -1811,7 +1936,7 @@ litest_delete_device(struct litest_device *d)
 	}
 	if (d->owns_context) {
 		libinput_dispatch(d->libinput);
-		libinput_unref(d->libinput);
+		litest_destroy_context(d->libinput);
 	}
 	close(libevdev_get_fd(d->evdev));
 	libevdev_free(d->evdev);
@@ -1954,10 +2079,11 @@ slot_start(struct litest_device *d,
 
 	send_btntool(d, !touching);
 
-	if (d->interface->touch_down) {
-		d->interface->touch_down(d, slot, x, y);
-		return;
-	}
+	/* If the test device overrides touch_down and says it didn't
+	 * handle the event, let's continue normally */
+	if (d->interface->touch_down &&
+	    d->interface->touch_down(d, slot, x, y))
+	    return;
 
 	for (ev = d->interface->touch_down_events;
 	     ev && (int16_t)ev->type != -1 && (int16_t)ev->code != -1;
@@ -1991,10 +2117,9 @@ slot_move(struct litest_device *d,
 {
 	struct input_event *ev;
 
-	if (d->interface->touch_move) {
-		d->interface->touch_move(d, slot, x, y);
+	if (d->interface->touch_move &&
+	    d->interface->touch_move(d, slot, x, y))
 		return;
-	}
 
 	for (ev = d->interface->touch_move_events;
 	     ev && (int16_t)ev->type != -1 && (int16_t)ev->code != -1;
@@ -2036,8 +2161,8 @@ touch_up(struct litest_device *d, unsigned int slot)
 
 	send_btntool(d, false);
 
-	if (d->interface->touch_up) {
-		d->interface->touch_up(d, slot);
+	if (d->interface->touch_up &&
+	    d->interface->touch_up(d, slot)) {
 		return;
 	} else if (d->interface->touch_up_events) {
 		ev = d->interface->touch_up_events;
@@ -2322,15 +2447,56 @@ tablet_ignore_event(const struct input_event *ev, int value)
 }
 
 void
+litest_tablet_set_tool_type(struct litest_device *d, unsigned int code)
+{
+	switch (code) {
+	case BTN_TOOL_PEN:
+	case BTN_TOOL_RUBBER:
+	case BTN_TOOL_BRUSH:
+	case BTN_TOOL_PENCIL:
+	case BTN_TOOL_AIRBRUSH:
+	case BTN_TOOL_MOUSE:
+	case BTN_TOOL_LENS:
+		break;
+	default:
+		abort();
+	}
+
+	d->interface->tool_type = code;
+}
+
+static void
+litest_tool_event(struct litest_device *d, int value)
+{
+	unsigned int tool = d->interface->tool_type;
+
+	litest_event(d, EV_KEY, tool, value);
+}
+
+void
 litest_tablet_proximity_in(struct litest_device *d, int x, int y, struct axis_replacement *axes)
 {
 	struct input_event *ev;
 
+	/* If the test device overrides proximity_in and says it didn't
+	 * handle the event, let's continue normally */
+	if (d->interface->tablet_proximity_in &&
+	    d->interface->tablet_proximity_in(d, d->interface->tool_type, x, y, axes))
+		return;
+
 	ev = d->interface->tablet_proximity_in_events;
 	while (ev && (int16_t)ev->type != -1 && (int16_t)ev->code != -1) {
-		int value = auto_assign_tablet_value(d, ev, x, y, axes);
-		if (!tablet_ignore_event(ev, value))
-			litest_event(d, ev->type, ev->code, value);
+		int value;
+
+		switch (evbit(ev->type, ev->code)) {
+		case evbit(EV_KEY, LITEST_BTN_TOOL_AUTO):
+			litest_tool_event(d, ev->value);
+			break;
+		default:
+			value = auto_assign_tablet_value(d, ev, x, y, axes);
+			if (!tablet_ignore_event(ev, value))
+				litest_event(d, ev->type, ev->code, value);
+		}
 		ev++;
 	}
 }
@@ -2340,11 +2506,26 @@ litest_tablet_proximity_out(struct litest_device *d)
 {
 	struct input_event *ev;
 
+	/* If the test device overrides proximity_out and says it didn't
+	 * handle the event, let's continue normally */
+	if (d->interface->tablet_proximity_out &&
+	    d->interface->tablet_proximity_out(d, d->interface->tool_type))
+		return;
+
 	ev = d->interface->tablet_proximity_out_events;
 	while (ev && (int16_t)ev->type != -1 && (int16_t)ev->code != -1) {
-		int value = auto_assign_tablet_value(d, ev, -1, -1, NULL);
-		if (!tablet_ignore_event(ev, value))
-			litest_event(d, ev->type, ev->code, value);
+		int value;
+
+		switch (evbit(ev->type, ev->code)) {
+		case evbit(EV_KEY, LITEST_BTN_TOOL_AUTO):
+			litest_tool_event(d, ev->value);
+			break;
+		default:
+			value = auto_assign_tablet_value(d, ev, -1, -1, NULL);
+			if (!tablet_ignore_event(ev, value))
+				litest_event(d, ev->type, ev->code, value);
+			break;
+		}
 		ev++;
 	}
 }
@@ -3505,21 +3686,30 @@ litest_assert_tablet_button_event(struct libinput *li, unsigned int button,
 	libinput_event_destroy(event);
 }
 
-void litest_assert_tablet_proximity_event(struct libinput *li,
-					  enum libinput_tablet_tool_proximity_state state)
+
+struct libinput_event_tablet_tool *
+litest_is_proximity_event(struct libinput_event *event,
+			  enum libinput_tablet_tool_proximity_state state)
 {
-	struct libinput_event *event;
 	struct libinput_event_tablet_tool *tev;
 	enum libinput_event_type type = LIBINPUT_EVENT_TABLET_TOOL_PROXIMITY;
-
-	litest_wait_for_event(li);
-	event = libinput_get_event(li);
 
 	litest_assert_notnull(event);
 	litest_assert_event_type(event, type);
 	tev = libinput_event_get_tablet_tool_event(event);
 	litest_assert_int_eq(libinput_event_tablet_tool_get_proximity_state(tev),
 			     state);
+	return tev;
+}
+
+void litest_assert_tablet_proximity_event(struct libinput *li,
+					  enum libinput_tablet_tool_proximity_state state)
+{
+	struct libinput_event *event;
+
+	litest_wait_for_event(li);
+	event = libinput_get_event(li);
+	litest_is_proximity_event(event, state);
 	libinput_event_destroy(event);
 }
 

@@ -153,7 +153,7 @@ tp_motion_history_push(struct tp_touch *t)
  * human can move like that within thresholds.
  *
  * We encode left moves as zeroes, and right as ones. We also drop
- * the array to all zeroes when contraints are not satisfied. Then we
+ * the array to all zeroes when constraints are not satisfied. Then we
  * search for the pattern {1,0,1}. It can't match {Left, Right, Left},
  * but it does match {Left, Right, Left, Right}, so it's okay.
  *
@@ -201,7 +201,7 @@ tp_detect_wobbling(struct tp_dispatch *tp,
 			tp->hysteresis.enabled = true;
 			evdev_log_debug(tp->device,
 					"hysteresis enabled. "
-					"See %stouchpad-jitter.html for details\n",
+					"See %s/touchpad-jitter.html for details\n",
 					HTTP_DOC_LINK);
 		}
 	}
@@ -256,8 +256,9 @@ tp_fake_finger_count(struct tp_dispatch *tp)
 
 	if (tp->fake_touches & FAKE_FINGER_OVERFLOW)
 		return FAKE_FINGER_OVERFLOW;
-	else /* don't count BTN_TOUCH */
-		return ffs(tp->fake_touches >> 1);
+
+	/* don't count BTN_TOUCH */
+	return ffs(tp->fake_touches >> 1);
 }
 
 static inline bool
@@ -350,6 +351,7 @@ tp_begin_touch(struct tp_dispatch *tp, struct tp_touch *t, uint64_t time)
 	t->dirty = true;
 	t->state = TOUCH_BEGIN;
 	t->time = time;
+	t->initial_time = time;
 	t->was_down = true;
 	tp->nfingers_down++;
 	t->palm.time = time;
@@ -525,10 +527,14 @@ tp_process_absolute(struct tp_dispatch *tp,
 		tp->slot = e->value;
 		break;
 	case ABS_MT_TRACKING_ID:
-		if (e->value != -1)
+		if (e->value != -1) {
+			tp->nactive_slots += 1;
 			tp_new_touch(tp, t, time);
-		else
+		} else {
+			assert(tp->nactive_slots >= 1);
+			tp->nactive_slots -= 1;
 			tp_end_sequence(tp, t, time);
+		}
 		break;
 	case ABS_MT_PRESSURE:
 		t->pressure = e->value;
@@ -605,11 +611,14 @@ tp_restore_synaptics_touches(struct tp_dispatch *tp,
 	    (tp->nfingers_down == tp->num_slots && nfake_touches == tp->num_slots))
 		return;
 
-	/* Synaptics devices may end touch 2 on BTN_TOOL_TRIPLETAP
-	 * and start it again on the next frame with different coordinates
-	 * (#91352). We search the touches we have, if there is one that has
-	 * just ended despite us being on tripletap, we move it back to
-	 * update.
+	/* Synaptics devices may end touch 2 on transition to/from
+	 * BTN_TOOL_TRIPLETAP and start it again on the next frame with
+	 * different coordinates (bz#91352, gitlab#434). We search the
+	 * touches we have, if there is one that has just ended despite us
+	 * being on tripletap, we move it back to update.
+	 *
+	 * Note: we only handle the transition from 2 to 3 touches, not the
+	 * other way round (see gitlab#434)
 	 */
 	for (i = 0; i < tp->num_slots; i++) {
 		struct tp_touch *t = tp_get_touch(tp, i);
@@ -637,6 +646,47 @@ tp_process_fake_touches(struct tp_dispatch *tp,
 	if (tp->device->model_flags &
 	    EVDEV_MODEL_SYNAPTICS_SERIAL_TOUCHPAD)
 		tp_restore_synaptics_touches(tp, time);
+
+	/* ALPS serial touchpads always set 3 slots in the kernel, even
+	 * where they support less than that. So we get BTN_TOOL_TRIPLETAP
+	 * but never slot 2 because our slot count is wrong.
+	 * This also means that the third touch falls through the cracks and
+	 * is ignored.
+	 *
+	 * See https://gitlab.freedesktop.org/libinput/libinput/issues/408
+	 *
+	 * All touchpad devices have at least one slot so we only do this
+	 * for 2 touches or higher.
+	 *
+	 * There's an bug in libevdev < 1.9.0 affecting slots after a
+	 * SYN_DROPPED. Where a user release one or more touches during
+	 * SYN_DROPPED and places new ones on the touchpad, we may end up
+	 * with fake touches but no active slots.
+	 * So let's check for nactive_slots > 0 to make sure we don't lose
+	 * all fingers. That's a workaround only, this must be fixed in
+	 * libevdev.
+	 *
+	 * For a long explanation of what happens, see
+	 * https://gitlab.freedesktop.org/libevdev/libevdev/merge_requests/19
+	 */
+	if (tp->device->model_flags & EVDEV_MODEL_ALPS_SERIAL_TOUCHPAD &&
+	    nfake_touches > 1 && tp->has_mt &&
+	    tp->nactive_slots > 0 &&
+	    nfake_touches > tp->nactive_slots &&
+	    tp->nactive_slots < tp->num_slots) {
+		evdev_log_bug_kernel(tp->device,
+				     "Wrong slot count (%d), reducing to %d\n",
+				     tp->num_slots,
+				     tp->nactive_slots);
+		/* This should be safe since we fill the slots from the
+		 * first one so hiding the excessive slots shouldn't matter.
+		 * There are sequences where we could accidentally lose an
+		 * actual touch point but that requires specially crafted
+		 * sequences and let's deal with that when it happens.
+		 */
+		tp->num_slots = tp->nactive_slots;
+	}
+
 
 	start = tp->has_mt ? tp->num_slots : 0;
 	for (i = start; i < tp->ntouches; i++) {
@@ -699,6 +749,10 @@ tp_process_key(struct tp_dispatch *tp,
 	       const struct input_event *e,
 	       uint64_t time)
 {
+	/* ignore kernel key repeat */
+	if (e->value == 2)
+		return;
+
 	switch (e->code) {
 		case BTN_LEFT:
 		case BTN_MIDDLE:
@@ -845,7 +899,9 @@ tp_palm_detect_dwt_triggered(struct tp_dispatch *tp,
 		t->palm.state = PALM_TYPING;
 		t->palm.first = t->point;
 		return true;
-	} else if (!tp->dwt.keyboard_active &&
+	}
+
+	if (!tp->dwt.keyboard_active &&
 		   t->state == TOUCH_UPDATE &&
 		   t->palm.state == PALM_TYPING) {
 		/* If a touch has started before the first or after the last
@@ -879,7 +935,9 @@ tp_palm_detect_trackpoint_triggered(struct tp_dispatch *tp,
 	    tp->palm.trackpoint_active) {
 		t->palm.state = PALM_TRACKPOINT;
 		return true;
-	} else if (t->palm.state == PALM_TRACKPOINT &&
+	}
+
+	if (t->palm.state == PALM_TRACKPOINT &&
 		   t->state == TOUCH_UPDATE &&
 		   !tp->palm.trackpoint_active) {
 
@@ -1021,7 +1079,9 @@ tp_palm_detect_edge(struct tp_dispatch *tp,
 				  t->index);
 		}
 		return false;
-	} else if (tp_palm_detect_multifinger(tp, t, time)) {
+	}
+
+	if (tp_palm_detect_multifinger(tp, t, time)) {
 		return false;
 	}
 
@@ -1148,8 +1208,9 @@ out:
 		break;
 	}
 	evdev_log_debug(tp->device,
-		  "palm: touch %d, palm detected (%s)\n",
+		  "palm: touch %d (%s), palm detected (%s)\n",
 		  t->index,
+		  touch_state_to_str(t->state),
 		  palm_state);
 }
 
@@ -1445,6 +1506,13 @@ tp_detect_jumps(const struct tp_dispatch *tp,
 	 * were measured from */
 	unsigned int reference_interval = ms2us(12);
 
+	/* On some touchpads the firmware does funky stuff and we cannot
+	 * have our own jump detection, e.g. Lenovo Carbon X1 Gen 6 (see
+	 * issue #506)
+	 */
+	if (tp->jump.detection_disabled)
+		return false;
+
 	/* We haven't seen pointer jumps on Wacom tablets yet, so exclude
 	 * those.
 	 */
@@ -1466,10 +1534,10 @@ tp_detect_jumps(const struct tp_dispatch *tp,
 	if (tp->device->model_flags & EVDEV_MODEL_TEST_DEVICE)
 		reference_interval = tdelta;
 
-	/* If the last frame is more than 25ms ago, we have irregular
+	/* If the last frame is more than 30ms ago, we have irregular
 	 * frames, who knows what's a pointer jump here and what's
 	 * legitimate movement.... */
-	if (tdelta > 2 * reference_interval || tdelta == 0)
+	if (tdelta > 2.5 * reference_interval || tdelta == 0)
 		return false;
 
 	/* We historically expected ~12ms frame intervals, so the numbers
@@ -1480,6 +1548,19 @@ tp_detect_jumps(const struct tp_dispatch *tp,
 	mm = evdev_device_unit_delta_to_mm(tp->device, &delta);
 	abs_distance = hypot(mm.x, mm.y) * reference_interval/tdelta;
 	rel_distance = abs_distance - t->jumps.last_delta_mm;
+
+	/* Special case for the ALPS devices in the Lenovo ThinkPad E465,
+	 * E550. These devices send occasional 4095/0 events on two fingers
+	 * before snapping back to the correct position.
+	 * https://gitlab.freedesktop.org/libinput/libinput/-/issues/492
+	 * The specific values are hardcoded here, if this ever happens on
+	 * any other device we can make it absmax/absmin instead.
+	 */
+	if (tp->device->model_flags & EVDEV_MODEL_ALPS_SERIAL_TOUCHPAD &&
+	    t->point.x == 4095 && t->point.y == 0) {
+		t->point = last->point;
+		return true;
+	}
 
 	/* Cursor jump if:
 	 * - current single-event delta is >20mm, or
@@ -1558,7 +1639,7 @@ tp_process_msc_timestamp(struct tp_dispatch *tp, uint64_t time)
 		   SYN_REPORT +8ms
 
 	   Our approach is to detect the 0 timestamp, check the interval on
-	   the next event and then calculate the movement for one fictious
+	   the next event and then calculate the movement for one fictitious
 	   event instead, swallowing all other movements. So if the time
 	   delta is equivalent to 10 events and the movement is x, we
 	   instead pretend there was movement of x/10.
@@ -1670,10 +1751,11 @@ tp_process_state(struct tp_dispatch *tp, uint64_t time)
 
 		if (tp_detect_jumps(tp, t, time)) {
 			if (!tp->semi_mt)
-				evdev_log_bug_kernel(tp->device,
-					       "Touch jump detected and discarded.\n"
-					       "See %stouchpad-jumping-cursors.html for details\n",
-					       HTTP_DOC_LINK);
+				evdev_log_bug_kernel_ratelimit(tp->device,
+						&tp->jump.warning,
+					        "Touch jump detected and discarded.\n"
+					        "See %s/touchpad-jumping-cursors.html for details\n",
+					        HTTP_DOC_LINK);
 			tp_motion_history_reset(t);
 		}
 
@@ -2021,6 +2103,7 @@ tp_sync_touch(struct tp_dispatch *tp,
 	      int slot)
 {
 	struct libevdev *evdev = device->evdev;
+	int tracking_id;
 
 	if (!libevdev_fetch_slot_value(evdev,
 				       slot,
@@ -2049,6 +2132,13 @@ tp_sync_touch(struct tp_dispatch *tp,
 				  slot,
 				  ABS_MT_TOUCH_MINOR,
 				  &t->minor);
+
+	if (libevdev_fetch_slot_value(evdev,
+				      slot,
+				      ABS_MT_TRACKING_ID,
+				      &tracking_id) &&
+	    tracking_id != -1)
+		tp->nactive_slots++;
 }
 
 static void
@@ -2257,7 +2347,8 @@ tp_want_dwt(struct evdev_device *touchpad,
 	   considered a happy couple */
 	if (touchpad->tags & EVDEV_TAG_EXTERNAL_TOUCHPAD)
 		return vendor_tp == vendor_kbd && product_tp == product_kbd;
-	else if (keyboard->tags & EVDEV_TAG_INTERNAL_KEYBOARD)
+
+	if (keyboard->tags & EVDEV_TAG_INTERNAL_KEYBOARD)
 		return true;
 
 	/* keyboard is not tagged as internal keyboard and it's not part of
@@ -2614,20 +2705,27 @@ evdev_tag_touchpad(struct evdev_device *device,
 		if (streq(prop, "internal")) {
 			evdev_tag_touchpad_internal(device);
 			return;
-		} else if (streq(prop, "external")) {
+		}
+
+		if (streq(prop, "external")) {
 			evdev_tag_touchpad_external(device);
 			return;
-		} else {
-			evdev_log_info(device,
-				       "tagged with unknown value %s\n",
-				       prop);
 		}
+
+		evdev_log_info(device,
+			       "tagged with unknown value %s\n",
+			       prop);
 	}
 
-	/* simple approach: touchpads on USB or Bluetooth are considered
-	 * external, anything else is internal. Exception is Apple -
-	 * internal touchpads are connected over USB and it doesn't have
-	 * external USB touchpads anyway.
+	/* The hwdb is the authority on integration, these heuristics are
+	 * the fallback only (they precede the hwdb too).
+	 *
+	 * Simple approach: USB is unknown, with the exception
+	 * of Apple where internal touchpads are connected over USB and it
+	 * doesn't have external USB touchpads anyway.
+	 *
+	 * Bluetooth touchpads are considered external, anything else is
+	 * internal.
 	 */
 	bustype = libevdev_get_id_bustype(device->evdev);
 	vendor = libevdev_get_id_vendor(device->evdev);
@@ -2854,33 +2952,12 @@ tp_init_slots(struct tp_dispatch *tp,
 	return true;
 }
 
-static uint32_t
-tp_accel_config_get_profiles(struct libinput_device *libinput_device)
-{
-	return LIBINPUT_CONFIG_ACCEL_PROFILE_NONE;
-}
-
 static enum libinput_config_status
 tp_accel_config_set_profile(struct libinput_device *libinput_device,
-			    enum libinput_config_accel_profile profile)
-{
-	return LIBINPUT_CONFIG_STATUS_UNSUPPORTED;
-}
-
-static enum libinput_config_accel_profile
-tp_accel_config_get_profile(struct libinput_device *libinput_device)
-{
-	return LIBINPUT_CONFIG_ACCEL_PROFILE_NONE;
-}
-
-static enum libinput_config_accel_profile
-tp_accel_config_get_default_profile(struct libinput_device *libinput_device)
-{
-	return LIBINPUT_CONFIG_ACCEL_PROFILE_NONE;
-}
+			    enum libinput_config_accel_profile profile);
 
 static bool
-tp_init_accel(struct tp_dispatch *tp)
+tp_init_accel(struct tp_dispatch *tp, enum libinput_config_accel_profile which)
 {
 	struct evdev_device *device = tp->device;
 	int res_x, res_y;
@@ -2896,14 +2973,16 @@ tp_init_accel(struct tp_dispatch *tp)
 	 * Normalize motion events to the default mouse DPI as base
 	 * (unaccelerated) speed. This also evens out any differences in x
 	 * and y resolution, so that a circle on the
-	 * touchpad does not turn into an elipse on the screen.
+	 * touchpad does not turn into an ellipse on the screen.
 	 */
 	tp->accel.x_scale_coeff = (DEFAULT_MOUSE_DPI/25.4) / res_x;
 	tp->accel.y_scale_coeff = (DEFAULT_MOUSE_DPI/25.4) / res_y;
 	tp->accel.xy_scale_coeff = 1.0 * res_x/res_y;
 
-	if (evdev_device_has_model_quirk(device, QUIRK_MODEL_LENOVO_X230) ||
-	    tp->device->model_flags & EVDEV_MODEL_LENOVO_X220_TOUCHPAD_FW81)
+	if (which == LIBINPUT_CONFIG_ACCEL_PROFILE_FLAT)
+		filter = create_pointer_accelerator_filter_touchpad_flat(dpi);
+	else if (evdev_device_has_model_quirk(device, QUIRK_MODEL_LENOVO_X230) ||
+		 tp->device->model_flags & EVDEV_MODEL_LENOVO_X220_TOUCHPAD_FW81)
 		filter = create_pointer_accelerator_filter_lenovo_x230(dpi, use_v_avg);
 	else if (libevdev_get_id_bustype(device->evdev) == BUS_BLUETOOTH)
 		filter = create_pointer_accelerator_filter_touchpad(dpi,
@@ -2918,14 +2997,47 @@ tp_init_accel(struct tp_dispatch *tp)
 
 	evdev_device_init_pointer_acceleration(tp->device, filter);
 
-	/* we override the profile hooks for accel configuration with hooks
-	 * that don't allow selection of profiles */
-	device->pointer.config.get_profiles = tp_accel_config_get_profiles;
 	device->pointer.config.set_profile = tp_accel_config_set_profile;
-	device->pointer.config.get_profile = tp_accel_config_get_profile;
-	device->pointer.config.get_default_profile = tp_accel_config_get_default_profile;
 
 	return true;
+}
+
+static enum libinput_config_status
+tp_accel_config_set_speed(struct libinput_device *device, double speed)
+{
+	struct evdev_device *dev = evdev_device(device);
+
+	if (!filter_set_speed(dev->pointer.filter, speed))
+		return LIBINPUT_CONFIG_STATUS_INVALID;
+
+	return LIBINPUT_CONFIG_STATUS_SUCCESS;
+}
+
+static enum libinput_config_status
+tp_accel_config_set_profile(struct libinput_device *libinput_device,
+			    enum libinput_config_accel_profile profile)
+{
+	struct evdev_device *device = evdev_device(libinput_device);
+	struct tp_dispatch *tp = tp_dispatch(device->dispatch);
+	struct motion_filter *filter;
+	double speed;
+
+	filter = device->pointer.filter;
+	if (filter_get_type(filter) == profile)
+		return LIBINPUT_CONFIG_STATUS_SUCCESS;
+
+	speed = filter_get_speed(filter);
+	device->pointer.filter = NULL;
+
+	if (tp_init_accel(tp, profile)) {
+		tp_accel_config_set_speed(libinput_device, speed);
+		filter_destroy(filter);
+	} else {
+		device->pointer.filter = filter;
+		return LIBINPUT_CONFIG_STATUS_UNSUPPORTED;
+	}
+
+	return LIBINPUT_CONFIG_STATUS_SUCCESS;
 }
 
 static uint32_t
@@ -3129,8 +3241,6 @@ tp_init_dwt(struct tp_dispatch *tp,
 	tp->dwt.config.get_default_enabled = tp_dwt_config_get_default;
 	tp->dwt.dwt_enabled = tp_dwt_default_enabled(tp);
 	device->base.config.dwt = &tp->dwt.config;
-
-	return;
 }
 
 static inline void
@@ -3384,7 +3494,7 @@ tp_init_hysteresis(struct tp_dispatch *tp)
 	if (tp->hysteresis.enabled)
 		evdev_log_debug(tp->device,
 				"hysteresis enabled. "
-				"See %stouchpad-jitter.html for details\n",
+				"See %s/touchpad-jitter.html for details\n",
 				HTTP_DOC_LINK);
 }
 
@@ -3525,13 +3635,16 @@ tp_init(struct tp_dispatch *tp,
 	if (!use_touch_size)
 		tp_init_pressure(tp, device);
 
+	/* 5 warnings per 2 hours should be enough */
+	ratelimit_init(&tp->jump.warning, s2us(2 * 60 * 60), 5);
+
 	/* Set the dpi to that of the x axis, because that's what we normalize
 	   to when needed*/
 	device->dpi = device->abs.absinfo_x->resolution * 25.4;
 
 	tp_init_hysteresis(tp);
 
-	if (!tp_init_accel(tp))
+	if (!tp_init_accel(tp, LIBINPUT_CONFIG_ACCEL_PROFILE_ADAPTIVE))
 		return false;
 
 	tp_init_tap(tp);
@@ -3542,6 +3655,14 @@ tp_init(struct tp_dispatch *tp,
 	tp_init_scroll(tp, device);
 	tp_init_gesture(tp);
 	tp_init_thumb(tp);
+
+	/* Lenovo X1 Gen6 buffers the events in a weird way, making jump
+	 * detection impossible. See
+	 * https://gitlab.freedesktop.org/libinput/libinput/-/issues/506
+	 */
+	if (evdev_device_has_model_quirk(device,
+					 QUIRK_MODEL_LENOVO_X1GEN6_TOUCHPAD))
+		tp->jump.detection_disabled = true;
 
 	device->seat_caps |= EVDEV_DEVICE_POINTER;
 	if (tp->gesture.enabled)

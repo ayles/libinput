@@ -53,6 +53,20 @@ enum touch_state {
 	TOUCH_END = 5,
 };
 
+static inline const char *
+touch_state_to_str(enum touch_state state)
+{
+	switch(state) {
+	CASE_RETURN_STRING(TOUCH_NONE);
+	CASE_RETURN_STRING(TOUCH_HOVERING);
+	CASE_RETURN_STRING(TOUCH_BEGIN);
+	CASE_RETURN_STRING(TOUCH_UPDATE);
+	CASE_RETURN_STRING(TOUCH_MAYBE_END);
+	CASE_RETURN_STRING(TOUCH_END);
+	}
+	return NULL;
+}
+
 enum touch_palm_state {
 	PALM_NONE = 0,
 	PALM_EDGE,
@@ -92,17 +106,40 @@ enum tp_tap_state {
 	TAP_STATE_IDLE = 4,
 	TAP_STATE_TOUCH,
 	TAP_STATE_HOLD,
-	TAP_STATE_TAPPED,
+	TAP_STATE_1FGTAP_TAPPED,
+	TAP_STATE_2FGTAP_TAPPED,
+	TAP_STATE_3FGTAP_TAPPED,
 	TAP_STATE_TOUCH_2,
 	TAP_STATE_TOUCH_2_HOLD,
 	TAP_STATE_TOUCH_2_RELEASE,
 	TAP_STATE_TOUCH_3,
 	TAP_STATE_TOUCH_3_HOLD,
-	TAP_STATE_DRAGGING_OR_DOUBLETAP,
-	TAP_STATE_DRAGGING_OR_TAP,
-	TAP_STATE_DRAGGING,
-	TAP_STATE_DRAGGING_WAIT,
-	TAP_STATE_DRAGGING_2,
+	TAP_STATE_TOUCH_3_RELEASE,
+	TAP_STATE_TOUCH_3_RELEASE_2,
+	TAP_STATE_1FGTAP_DRAGGING_OR_DOUBLETAP,
+	TAP_STATE_2FGTAP_DRAGGING_OR_DOUBLETAP,
+	TAP_STATE_3FGTAP_DRAGGING_OR_DOUBLETAP,
+	TAP_STATE_1FGTAP_DRAGGING_OR_DOUBLETAP_2,
+	TAP_STATE_2FGTAP_DRAGGING_OR_DOUBLETAP_2,
+	TAP_STATE_3FGTAP_DRAGGING_OR_DOUBLETAP_2,
+	TAP_STATE_1FGTAP_DRAGGING_OR_DOUBLETAP_2_RELEASE,
+	TAP_STATE_2FGTAP_DRAGGING_OR_DOUBLETAP_2_RELEASE,
+	TAP_STATE_3FGTAP_DRAGGING_OR_DOUBLETAP_2_RELEASE,
+	TAP_STATE_1FGTAP_DRAGGING_OR_TAP,
+	TAP_STATE_2FGTAP_DRAGGING_OR_TAP,
+	TAP_STATE_3FGTAP_DRAGGING_OR_TAP,
+	TAP_STATE_1FGTAP_DRAGGING_OR_TAP_2,
+	TAP_STATE_2FGTAP_DRAGGING_OR_TAP_2,
+	TAP_STATE_3FGTAP_DRAGGING_OR_TAP_2,
+	TAP_STATE_1FGTAP_DRAGGING,
+	TAP_STATE_2FGTAP_DRAGGING,
+	TAP_STATE_3FGTAP_DRAGGING,
+	TAP_STATE_1FGTAP_DRAGGING_WAIT,
+	TAP_STATE_2FGTAP_DRAGGING_WAIT,
+	TAP_STATE_3FGTAP_DRAGGING_WAIT,
+	TAP_STATE_1FGTAP_DRAGGING_2,
+	TAP_STATE_2FGTAP_DRAGGING_2,
+	TAP_STATE_3FGTAP_DRAGGING_2,
 	TAP_STATE_DEAD, /**< finger count exceeded */
 };
 
@@ -158,6 +195,7 @@ struct tp_touch {
 	bool dirty;
 	struct device_coords point;
 	uint64_t time;
+	uint64_t initial_time;
 	int pressure;
 	bool is_tool_palm; /* MT_TOOL_PALM */
 	int major, minor;
@@ -268,6 +306,7 @@ struct tp_dispatch {
 		struct libinput_timer arbitration_timer;
 	} arbitration;
 
+	unsigned int nactive_slots;		/* number of active slots */
 	unsigned int num_slots;			/* number of slots */
 	unsigned int ntouches;			/* no slots inc. fakes */
 	struct tp_touch *touches;		/* len == ntouches */
@@ -277,6 +316,11 @@ struct tp_dispatch {
 	 * ...
 	 */
 	unsigned int fake_touches;
+
+	struct {
+		bool detection_disabled;
+		struct ratelimit warning;
+	} jump;
 
 	/* if pressure goes above high -> touch down,
 	   if pressure then goes below low -> touch up */
@@ -386,7 +430,8 @@ struct tp_dispatch {
 		enum tp_tap_state state;
 		uint32_t buttons_pressed;
 		uint64_t saved_press_time,
-			 saved_release_time;
+			 saved_release_time,
+			 saved_multitap_release_time;
 
 		enum libinput_config_tap_button_map map;
 		enum libinput_config_tap_button_map want_map;
@@ -619,7 +664,7 @@ tp_button_is_inside_softbutton_area(const struct tp_dispatch *tp,
 
 void
 tp_release_all_taps(struct tp_dispatch *tp,
-		    uint64_t time);
+		    uint64_t now);
 
 void
 tp_tap_suspend(struct tp_dispatch *tp, uint64_t time);

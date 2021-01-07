@@ -108,6 +108,7 @@ enum evdev_device_model {
 	EVDEV_MODEL_DEFAULT = 0,
 	EVDEV_MODEL_WACOM_TOUCHPAD		= bit(1),
 	EVDEV_MODEL_SYNAPTICS_SERIAL_TOUCHPAD	= bit(2),
+	EVDEV_MODEL_ALPS_SERIAL_TOUCHPAD	= bit(3),
 	EVDEV_MODEL_LENOVO_T450_TOUCHPAD	= bit(4),
 	EVDEV_MODEL_APPLE_TOUCHPAD_ONEBUTTON	= bit(5),
 	EVDEV_MODEL_LENOVO_SCROLLPOINT		= bit(6),
@@ -178,6 +179,7 @@ struct evdev_device {
 	double trackpoint_multiplier; /* trackpoint constant multiplier */
 	bool use_velocity_averaging; /* whether averaging should be applied on velocity calculation */
 	struct ratelimit syn_drop_limit; /* ratelimit for SYN_DROPPED logging */
+	struct ratelimit delay_warning_limit; /* ratelimit for delayd processing logging */
 	struct ratelimit nonpointer_rel_limit; /* ratelimit for REL_* events from non-pointer devices */
 	uint32_t model_flags;
 	struct mtdev *mtdev;
@@ -230,8 +232,6 @@ struct evdev_device {
 
 		/* angle per REL_WHEEL click in degrees */
 		struct wheel_angle wheel_click_angle;
-
-		struct wheel_tilt_flags is_tilt;
 
 		enum evdev_button_scroll_lock_state lock_state;
 		bool want_lock_enabled;
@@ -813,12 +813,17 @@ evdev_log_msg_ratelimit(struct evdev_device *device,
 	log_msg_va(evdev_libinput_context(device), priority, buf, args);
 	va_end(args);
 
-	if (state == RATELIMIT_THRESHOLD)
+	if (state == RATELIMIT_THRESHOLD) {
+		struct human_time ht = to_human_time(ratelimit->interval);
 		evdev_log_msg(device,
 			      priority,
-			      "WARNING: log rate limit exceeded (%d msgs per %dms). Discarding future messages.\n",
+			      "WARNING: log rate limit exceeded (%d msgs per %d%s). "
+			      "Discarding future messages.\n",
 			      ratelimit->burst,
-			      us2ms(ratelimit->interval));
+			      ht.value,
+			      ht.unit);
+
+	}
 }
 
 #define evdev_log_debug(d_, ...) evdev_log_msg((d_), LIBINPUT_LOG_PRIORITY_DEBUG, __VA_ARGS__)
@@ -998,7 +1003,7 @@ evdev_device_check_abs_axis_range(struct evdev_device *device,
 		log_info_ratelimit(evdev_libinput_context(device),
 				   &device->abs.warning_range.range_warn_limit,
 				   "Axis %#x value %d is outside expected range [%d, %d]\n"
-				   "See %sabsolute_coordinate_ranges.html for details\n",
+				   "See %s/absolute_coordinate_ranges.html for details\n",
 				   code, value, min, max,
 				   HTTP_DOC_LINK);
 	}

@@ -76,37 +76,6 @@ ASSERT_INT_SIZE(enum libinput_config_middle_emulation_state);
 ASSERT_INT_SIZE(enum libinput_config_scroll_method);
 ASSERT_INT_SIZE(enum libinput_config_dwt_state);
 
-static inline bool
-check_event_type(struct libinput *libinput,
-		 const char *function_name,
-		 unsigned int type_in,
-		 ...)
-{
-	bool rc = false;
-	va_list args;
-	unsigned int type_permitted;
-
-	va_start(args, type_in);
-	type_permitted = va_arg(args, unsigned int);
-
-	while (type_permitted != (unsigned int)-1) {
-		if (type_permitted == type_in) {
-			rc = true;
-			break;
-		}
-		type_permitted = va_arg(args, unsigned int);
-	}
-
-	va_end(args);
-
-	if (!rc)
-		log_bug_client(libinput,
-			       "Invalid event type %d passed to %s()\n",
-			       type_in, function_name);
-
-	return rc;
-}
-
 static inline const char *
 event_type_to_str(enum libinput_event_type type)
 {
@@ -143,6 +112,39 @@ event_type_to_str(enum libinput_event_type type)
 	}
 
 	return NULL;
+}
+
+static inline bool
+check_event_type(struct libinput *libinput,
+		 const char *function_name,
+		 unsigned int type_in,
+		 ...)
+{
+	bool rc = false;
+	va_list args;
+	unsigned int type_permitted;
+
+	va_start(args, type_in);
+	type_permitted = va_arg(args, unsigned int);
+
+	while (type_permitted != (unsigned int)-1) {
+		if (type_permitted == type_in) {
+			rc = true;
+			break;
+		}
+		type_permitted = va_arg(args, unsigned int);
+	}
+
+	va_end(args);
+
+	if (!rc) {
+		const char *name = event_type_to_str(type_in);
+		log_bug_client(libinput,
+			       "Invalid event type %s (%d) passed to %s()\n",
+			       name, type_in, function_name);
+	}
+
+	return rc;
 }
 
 struct libinput_source {
@@ -1821,7 +1823,7 @@ libinput_init_quirks(struct libinput *libinput)
 		log_error(libinput,
 			  "Failed to load the device quirks from %s%s%s. "
 			  "This will negatively affect device behavior. "
-			  "See %sdevice-quirks.html for details.\n",
+			  "See %s/device-quirks.html for details.\n",
 			  data_path,
 			  override_file ? " and " : "",
 			  override_file ? override_file : "",
@@ -2020,9 +2022,9 @@ libinput_seat_unref(struct libinput_seat *seat)
 	if (seat->refcount == 0) {
 		libinput_seat_destroy(seat);
 		return NULL;
-	} else {
-		return seat;
 	}
+
+	return seat;
 }
 
 LIBINPUT_EXPORT void
@@ -2086,9 +2088,9 @@ libinput_device_unref(struct libinput_device *device)
 	if (device->refcount == 0) {
 		libinput_device_destroy(device);
 		return NULL;
-	} else {
-		return device;
 	}
+
+	return device;
 }
 
 LIBINPUT_EXPORT int
@@ -2100,9 +2102,18 @@ libinput_get_fd(struct libinput *libinput)
 LIBINPUT_EXPORT int
 libinput_dispatch(struct libinput *libinput)
 {
+	static uint8_t take_time_snapshot;
 	struct libinput_source *source;
 	struct epoll_event ep[32];
 	int i, count;
+
+	/* Every 10 calls to libinput_dispatch() we take the current time so
+	 * we can check the delay between our current time and the event
+	 * timestamps */
+	if ((++take_time_snapshot % 10) == 0)
+		libinput->dispatch_time = libinput_now(libinput);
+	else if (libinput->dispatch_time)
+		libinput->dispatch_time = 0;
 
 	count = epoll_wait(libinput->epoll_fd, ep, ARRAY_LENGTH(ep), 0);
 	if (count < 0)
@@ -3608,9 +3619,9 @@ libinput_device_group_unref(struct libinput_device_group *group)
 	if (group->refcount == 0) {
 		libinput_device_group_destroy(group);
 		return NULL;
-	} else {
-		return group;
 	}
+
+	return group;
 }
 
 LIBINPUT_EXPORT void
@@ -3845,8 +3856,9 @@ libinput_device_config_send_events_set_mode(struct libinput_device *device,
 
 	if (device->config.sendevents)
 		return device->config.sendevents->set_mode(device, mode);
-	else /* mode must be _ENABLED to get here */
-		return LIBINPUT_CONFIG_STATUS_SUCCESS;
+
+	/* mode must be _ENABLED to get here */
+	return LIBINPUT_CONFIG_STATUS_SUCCESS;
 }
 
 LIBINPUT_EXPORT uint32_t
@@ -3854,8 +3866,8 @@ libinput_device_config_send_events_get_mode(struct libinput_device *device)
 {
 	if (device->config.sendevents)
 		return device->config.sendevents->get_mode(device);
-	else
-		return LIBINPUT_CONFIG_SEND_EVENTS_ENABLED;
+
+	return LIBINPUT_CONFIG_SEND_EVENTS_ENABLED;
 }
 
 LIBINPUT_EXPORT uint32_t
@@ -4027,8 +4039,8 @@ libinput_device_config_click_get_methods(struct libinput_device *device)
 {
 	if (device->config.click_method)
 		return device->config.click_method->get_methods(device);
-	else
-		return 0;
+
+	return 0;
 }
 
 LIBINPUT_EXPORT enum libinput_config_status
@@ -4050,8 +4062,9 @@ libinput_device_config_click_set_method(struct libinput_device *device,
 
 	if (device->config.click_method)
 		return device->config.click_method->set_method(device, method);
-	else /* method must be _NONE to get here */
-		return LIBINPUT_CONFIG_STATUS_SUCCESS;
+
+	/* method must be _NONE to get here */
+	return LIBINPUT_CONFIG_STATUS_SUCCESS;
 }
 
 LIBINPUT_EXPORT enum libinput_config_click_method
@@ -4059,8 +4072,8 @@ libinput_device_config_click_get_method(struct libinput_device *device)
 {
 	if (device->config.click_method)
 		return device->config.click_method->get_method(device);
-	else
-		return LIBINPUT_CONFIG_CLICK_METHOD_NONE;
+
+	return LIBINPUT_CONFIG_CLICK_METHOD_NONE;
 }
 
 LIBINPUT_EXPORT enum libinput_config_click_method
@@ -4068,8 +4081,8 @@ libinput_device_config_click_get_default_method(struct libinput_device *device)
 {
 	if (device->config.click_method)
 		return device->config.click_method->get_default_method(device);
-	else
-		return LIBINPUT_CONFIG_CLICK_METHOD_NONE;
+
+	return LIBINPUT_CONFIG_CLICK_METHOD_NONE;
 }
 
 LIBINPUT_EXPORT int
@@ -4078,8 +4091,8 @@ libinput_device_config_middle_emulation_is_available(
 {
 	if (device->config.middle_emulation)
 		return device->config.middle_emulation->available(device);
-	else
-		return LIBINPUT_CONFIG_MIDDLE_EMULATION_DISABLED;
+
+	return LIBINPUT_CONFIG_MIDDLE_EMULATION_DISABLED;
 }
 
 LIBINPUT_EXPORT enum libinput_config_status
@@ -4131,8 +4144,8 @@ libinput_device_config_scroll_get_methods(struct libinput_device *device)
 {
 	if (device->config.scroll_method)
 		return device->config.scroll_method->get_methods(device);
-	else
-		return 0;
+
+	return 0;
 }
 
 LIBINPUT_EXPORT enum libinput_config_status
@@ -4155,8 +4168,9 @@ libinput_device_config_scroll_set_method(struct libinput_device *device,
 
 	if (device->config.scroll_method)
 		return device->config.scroll_method->set_method(device, method);
-	else /* method must be _NO_SCROLL to get here */
-		return LIBINPUT_CONFIG_STATUS_SUCCESS;
+
+	/* method must be _NO_SCROLL to get here */
+	return LIBINPUT_CONFIG_STATUS_SUCCESS;
 }
 
 LIBINPUT_EXPORT enum libinput_config_scroll_method
@@ -4164,8 +4178,8 @@ libinput_device_config_scroll_get_method(struct libinput_device *device)
 {
 	if (device->config.scroll_method)
 		return device->config.scroll_method->get_method(device);
-	else
-		return LIBINPUT_CONFIG_SCROLL_NO_SCROLL;
+
+	return LIBINPUT_CONFIG_SCROLL_NO_SCROLL;
 }
 
 LIBINPUT_EXPORT enum libinput_config_scroll_method
@@ -4173,8 +4187,8 @@ libinput_device_config_scroll_get_default_method(struct libinput_device *device)
 {
 	if (device->config.scroll_method)
 		return device->config.scroll_method->get_default_method(device);
-	else
-		return LIBINPUT_CONFIG_SCROLL_NO_SCROLL;
+
+	return LIBINPUT_CONFIG_SCROLL_NO_SCROLL;
 }
 
 LIBINPUT_EXPORT enum libinput_config_status

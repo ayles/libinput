@@ -809,6 +809,8 @@ window_init(struct window *w)
 	list_init(&w->evdev_devices);
 
 	w->win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+	if (getenv("LIBINPUT_RUNNING_TEST_SUITE"))
+		gtk_window_iconify(GTK_WINDOW(w->win));
 	gtk_widget_set_events(w->win, 0);
 	gtk_window_set_title(GTK_WINDOW(w->win), "libinput debugging tool");
 	gtk_window_set_default_size(GTK_WINDOW(w->win), 1024, 768);
@@ -1420,7 +1422,7 @@ handle_event_libinput(GIOChannel *source, GIOCondition condition, gpointer data)
 	struct window *w = libinput_get_user_data(li);
 	struct libinput_event *ev;
 
-	libinput_dispatch(li);
+	tools_dispatch(li);
 
 	while ((ev = libinput_get_event(li))) {
 		switch (libinput_event_get_type(ev)) {
@@ -1485,7 +1487,6 @@ handle_event_libinput(GIOChannel *source, GIOCondition condition, gpointer data)
 		}
 
 		libinput_event_destroy(ev);
-		libinput_dispatch(li);
 	}
 	gtk_widget_queue_draw(w->area);
 
@@ -1521,7 +1522,7 @@ main(int argc, char **argv)
 	struct tools_options options;
 	struct libinput *li;
 	enum tools_backend backend = BACKEND_NONE;
-	char *seat_or_device[2] = {"seat0", NULL};
+	const char *seat_or_device[2] = {"seat0", NULL};
 	bool verbose = false;
 
 	if (!gtk_init_check(&argc, &argv))

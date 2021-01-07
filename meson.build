@@ -1,8 +1,8 @@
 project('libinput', 'c',
-	version : '1.15.0',
+	version : '1.16.900',
 	license : 'MIT/Expat',
 	default_options : [ 'c_std=gnu99', 'warning_level=2' ],
-	meson_version : '>= 0.41.0')
+	meson_version : '>= 0.47.0')
 
 libinput_version = meson.project_version().split('.')
 
@@ -22,7 +22,6 @@ if dir_udev == ''
 endif
 dir_udev_callouts = dir_udev
 dir_udev_rules    = join_paths(dir_udev, 'rules.d')
-dir_udev_hwdb     = join_paths(dir_udev, 'hwdb.d')
 
 
 # We use libtool-version numbers because it's easier to understand.
@@ -43,19 +42,34 @@ libinput_so_version = '@0@.@1@.@2@'.format((libinput_lt_c - libinput_lt_a),
 
 # Compiler setup
 cc = meson.get_compiler('c')
-cppflags = ['-Wno-unused-parameter', '-fvisibility=hidden']
-cflags = cppflags + ['-Wmissing-prototypes', '-Wstrict-prototypes']
-add_project_arguments(cflags, language : 'c')
-add_project_arguments(cppflags, language : 'cpp')
+cflags = [
+	'-Wno-unused-parameter',
+	'-Wmissing-prototypes',
+	'-Wstrict-prototypes',
+	'-Wundef',
+	'-Wlogical-op',
+	'-Wpointer-arith',
+	'-Wuninitialized',
+	'-Winit-self',
+	'-Wstrict-prototypes',
+	'-Wimplicit-fallthrough',
+	'-Wredundant-decls',
+	'-Wincompatible-pointer-types',
+	'-Wformat=2',
+	'-Wmissing-declarations',
+
+	'-fvisibility=hidden',
+]
+add_project_arguments(cc.get_supported_arguments(cflags), language : 'c')
 
 # config.h
 config_h = configuration_data()
 
 doc_url_base = 'https://wayland.freedesktop.org/libinput/doc'
 if libinput_version[2].to_int() >= 90
-	doc_url = '@0@/latest/'.format(doc_url_base)
+	doc_url = '@0@/latest'.format(doc_url_base)
 else
-	doc_url = '@0@/@1@/'.format(doc_url_base, meson.project_version())
+	doc_url = '@0@/@1@'.format(doc_url_base, meson.project_version())
 endif
 config_h.set_quoted('HTTP_DOC_LINK', doc_url)
 
@@ -125,6 +139,9 @@ pkgconfig = import('pkgconfig')
 dep_udev = dependency('libudev')
 dep_mtdev = dependency('mtdev', version : '>= 1.1.0')
 dep_libevdev = dependency('libevdev')
+config_h.set10('HAVE_LIBEVDEV_DISABLE_PROPERTY',
+		dep_libevdev.version().version_compare('>= 1.9.902'))
+
 dep_lm = cc.find_library('m', required : false)
 dep_rt = cc.find_library('rt', required : false)
 
@@ -137,15 +154,7 @@ includes_src = include_directories('src')
 have_libwacom = get_option('libwacom')
 config_h.set10('HAVE_LIBWACOM', have_libwacom)
 if have_libwacom
-	dep_libwacom = dependency('libwacom', version : '>= 0.20')
-
-	result = cc.has_function('libwacom_get_paired_device',
-				 dependencies: dep_libwacom)
-	config_h.set10('HAVE_LIBWACOM_GET_PAIRED_DEVICE', result)
-
-	result = cc.has_function('libwacom_get_button_evdev_code',
-				 dependencies: dep_libwacom)
-	config_h.set10('HAVE_LIBWACOM_GET_BUTTON_EVDEV_CODE', result)
+	dep_libwacom = dependency('libwacom', version : '>= 0.27')
 else
 	dep_libwacom = declare_dependency()
 endif
@@ -289,6 +298,7 @@ src_libfilter = [
 		'src/filter-low-dpi.c',
 		'src/filter-mouse.c',
 		'src/filter-touchpad.c',
+		'src/filter-touchpad-flat.c',
 		'src/filter-touchpad-x230.c',
 		'src/filter-tablet.c',
 		'src/filter-trackpoint.c',
@@ -306,47 +316,11 @@ libinput_data_override_path = join_paths(dir_sysconf, 'local-overrides.quirks')
 config_h.set_quoted('LIBINPUT_QUIRKS_DIR', dir_data)
 config_h.set_quoted('LIBINPUT_QUIRKS_OVERRIDE_FILE', libinput_data_override_path)
 
-quirks_data = [
-	'quirks/10-generic-keyboard.quirks',
-	'quirks/10-generic-lid.quirks',
-	'quirks/10-generic-trackball.quirks',
-	'quirks/30-vendor-aiptek.quirks',
-	'quirks/30-vendor-alps.quirks',
-	'quirks/30-vendor-contour.quirks',
-	'quirks/30-vendor-cypress.quirks',
-	'quirks/30-vendor-elantech.quirks',
-	'quirks/30-vendor-ibm.quirks',
-	'quirks/30-vendor-kensington.quirks',
-	'quirks/30-vendor-logitech.quirks',
-	'quirks/30-vendor-madcatz.quirks',
-	'quirks/30-vendor-microsoft.quirks',
-	'quirks/30-vendor-razer.quirks',
-	'quirks/30-vendor-synaptics.quirks',
-	'quirks/30-vendor-vmware.quirks',
-	'quirks/30-vendor-wacom.quirks',
-	'quirks/50-system-acer.quirks',
-	'quirks/50-system-apple.quirks',
-	'quirks/50-system-asus.quirks',
-	'quirks/50-system-chicony.quirks',
-	'quirks/50-system-cyborg.quirks',
-	'quirks/50-system-dell.quirks',
-	'quirks/50-system-google.quirks',
-	'quirks/50-system-hp.quirks',
-	'quirks/50-system-lenovo.quirks',
-	'quirks/50-system-system76.quirks',
-	'quirks/50-system-toshiba.quirks',
-]
-
-test('quirks-in-meson.build',
-     find_program('quirks/test-quirks-in-meson.build.sh'),
-     args : [meson.current_source_dir()],
-     suite : ['all']
-     )
-
-config_h.set_quoted('LIBINPUT_QUIRKS_FILES', ':'.join(quirks_data))
 config_h.set_quoted('LIBINPUT_QUIRKS_SRCDIR', dir_src_quirks)
-
-install_data(quirks_data, install_dir : dir_data)
+install_subdir('quirks',
+	       exclude_files: ['README.md'],
+	       install_dir : dir_data,
+	       strip_directory : true)
 
 src_libquirks = [
 	'src/quirks.c',
@@ -445,13 +419,6 @@ git_version_h = vcs_tag(command : ['git', 'describe'],
 			fallback : 'unknown',
 			input : 'src/libinput-git-version.h.in',
 			output :'libinput-git-version.h')
-
-if meson.version().version_compare('<0.43.0')
-	# Restore the SELinux context for the libinput.so.a.b.c on install
-	# meson bug https://github.com/mesonbuild/meson/issues/1967
-	meson.add_install_script('src/libinput-restore-selinux-context.sh',
-				 dir_lib, lib_libinput.full_path())
-endif
 
 ############ documentation ############
 
@@ -577,8 +544,24 @@ configure_file(input : 'tools/libinput-measure.man',
 	       install_dir : dir_man1,
 	       )
 
+libinput_analyze_sources = [ 'tools/libinput-analyze.c' ]
+executable('libinput-analyze',
+	   libinput_analyze_sources,
+	   dependencies : deps_tools,
+	   include_directories : [includes_src, includes_include],
+	   install_dir : libinput_tool_path,
+	   install : true,
+	   )
+configure_file(input : 'tools/libinput-analyze.man',
+	       output : 'libinput-analyze.1',
+	       configuration : man_config,
+	       install_dir : dir_man1,
+	       )
+
 src_python_tools = files(
+	      'tools/libinput-analyze-per-slot-delta.py',
 	      'tools/libinput-measure-fuzz.py',
+	      'tools/libinput-measure-touchpad-size.py',
 	      'tools/libinput-measure-touchpad-tap.py',
 	      'tools/libinput-measure-touchpad-pressure.py',
 	      'tools/libinput-measure-touch-size.py',
@@ -601,9 +584,11 @@ endforeach
 
 src_man = files(
 	      'tools/libinput-measure-fuzz.man',
+	      'tools/libinput-measure-touchpad-size.man',
 	      'tools/libinput-measure-touchpad-tap.man',
 	      'tools/libinput-measure-touchpad-pressure.man',
 	      'tools/libinput-measure-touch-size.man',
+	      'tools/libinput-analyze-per-slot-delta.man',
 )
 
 foreach m : src_man
@@ -686,13 +671,16 @@ executable('ptraccel-debug',
 # subtool lookup
 if get_option('buildtype') == 'debug' or get_option('buildtype') == 'debugoptimized'
 	config_tool_option_test = configuration_data()
+	config_tool_option_test.set('DISABLE_WARNING', 'yes')
 	config_tool_option_test.set('MESON_ENABLED_DEBUG_GUI', get_option('debug-gui'))
-	tool_option_test = configure_file(input: 'tools/test-tool-option-parsing.py',
-					  output: '@BASENAME@',
+	config_tool_option_test.set('MESON_BUILD_ROOT', meson.current_build_dir())
+	config_tool_option_test.set('TOOL_PATH', libinput_tool.full_path())
+	tool_option_test = configure_file(input: 'tools/test_tool_option_parsing.py',
+					  output: '@PLAINNAME@',
 					  configuration : config_tool_option_test)
 	test('tool-option-parsing',
 	     tool_option_test,
-	     args : ['--tool-path', libinput_tool.full_path()],
+	     args : [tool_option_test, '-n', 'auto'],
 	     suite : ['all', 'root'],
 	     timeout : 240)
 endif
@@ -767,9 +755,11 @@ if get_option('tests')
 	litest_sources = [
 		'test/litest.h',
 		'test/litest-int.h',
+		'test/litest-device-absinfo-override.c',
 		'test/litest-device-acer-hawaii-keyboard.c',
 		'test/litest-device-acer-hawaii-touchpad.c',
 		'test/litest-device-aiptek-tablet.c',
+		'test/litest-device-alps-3fg.c',
 		'test/litest-device-alps-semi-mt.c',
 		'test/litest-device-alps-dualpoint.c',
 		'test/litest-device-anker-mouse-kbd.c',
@@ -784,6 +774,7 @@ if get_option('tests')
 		'test/litest-device-dell-canvas-totem.c',
 		'test/litest-device-dell-canvas-totem-touch.c',
 		'test/litest-device-elantech-touchpad.c',
+		'test/litest-device-elan-tablet.c',
 		'test/litest-device-generic-singletouch.c',
 		'test/litest-device-gpio-keys.c',
 		'test/litest-device-huion-pentablet.c',
@@ -791,11 +782,13 @@ if get_option('tests')
 		'test/litest-device-ignored-mouse.c',
 		'test/litest-device-keyboard.c',
 		'test/litest-device-keyboard-all-codes.c',
+		'test/litest-device-keyboard-quirked.c',
 		'test/litest-device-keyboard-razer-blackwidow.c',
 		'test/litest-device-keyboard-razer-blade-stealth.c',
 		'test/litest-device-keyboard-razer-blade-stealth-videoswitch.c',
 		'test/litest-device-lid-switch.c',
 		'test/litest-device-lid-switch-surface3.c',
+		'test/litest-device-logitech-media-keyboard-elite.c',
 		'test/litest-device-logitech-trackball.c',
 		'test/litest-device-nexus4-touch-screen.c',
 		'test/litest-device-magic-trackpad.c',
@@ -809,6 +802,7 @@ if get_option('tests')
 		'test/litest-device-ms-surface-cover.c',
 		'test/litest-device-protocol-a-touch-screen.c',
 		'test/litest-device-qemu-usb-tablet.c',
+		'test/litest-device-sony-vaio-keys.c',
 		'test/litest-device-synaptics-x220.c',
 		'test/litest-device-synaptics-hover.c',
 		'test/litest-device-synaptics-i2c.c',
@@ -816,6 +810,7 @@ if get_option('tests')
 		'test/litest-device-synaptics-st.c',
 		'test/litest-device-synaptics-t440.c',
 		'test/litest-device-synaptics-x1-carbon-3rd.c',
+		'test/litest-device-tablet-mode-switch.c',
 		'test/litest-device-thinkpad-extrabuttons.c',
 		'test/litest-device-trackpoint.c',
 		'test/litest-device-touch-screen.c',

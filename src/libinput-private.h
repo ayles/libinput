@@ -111,11 +111,6 @@ struct phys_ellipsis {
 	double minor;
 };
 
-/* A pair of tilt flags */
-struct wheel_tilt_flags {
-	bool vertical, horizontal;
-};
-
 struct libinput_interface_backend {
 	int (*resume)(struct libinput *libinput);
 	void (*suspend)(struct libinput *libinput);
@@ -156,6 +151,7 @@ struct libinput {
 	struct list device_group_list;
 
 	uint64_t last_event_time;
+	uint64_t dispatch_time;
 
 	bool quirks_initialized;
 	struct quirks_context *quirks;
@@ -382,11 +378,13 @@ struct libinput_tablet_tool {
 	int refcount;
 	void *user_data;
 
-	/* The pressure threshold assumes a pressure_offset of 0 */
-	struct threshold pressure_threshold;
-	/* pressure_offset includes axis->minimum */
-	int pressure_offset;
-	bool has_pressure_offset;
+	struct {
+		/* The pressure threshold assumes a pressure_offset of 0 */
+		struct threshold threshold;
+		/* pressure_offset includes axis->minimum */
+		int offset;
+		bool has_offset;
+	} pressure;
 };
 
 struct libinput_tablet_pad_mode_group {

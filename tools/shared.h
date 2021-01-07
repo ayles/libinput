@@ -116,7 +116,7 @@ int tools_parse_option(int option,
 		       const char *optarg,
 		       struct tools_options *options);
 struct libinput* tools_open_backend(enum tools_backend which,
-				    char **seat_or_devices,
+				    const char **seat_or_devices,
 				    bool verbose,
 				    bool *grab);
 void tools_device_apply_config(struct libinput_device *device,
@@ -132,4 +132,6 @@ tools_list_device_quirks(struct quirks_context *ctx,
 			 void (*callback)(void *userdata, const char *str),
 			 void *userdata);
 
+void
+tools_dispatch(struct libinput *libinput);
 #endif

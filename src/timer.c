@@ -48,7 +48,7 @@ libinput_timer_init(struct libinput_timer *timer,
 void
 libinput_timer_destroy(struct libinput_timer *timer)
 {
-	if (timer->link.prev != NULL && timer->link.prev != NULL &&
+	if (timer->link.prev != NULL && timer->link.next != NULL &&
 	    !list_empty(&timer->link)) {
 		log_bug_libinput(timer->libinput,
 				 "timer: %s has not been cancelled\n",
@@ -93,7 +93,7 @@ libinput_timer_set_flags(struct libinput_timer *timer,
 	if (expire < now) {
 		if ((flags & TIMER_FLAG_ALLOW_NEGATIVE) == 0)
 			log_bug_client(timer->libinput,
-				       "timer %s: offset negative (-%dms)\n",
+				       "timer %s: scheduled expiry is in the past (-%dms), your system is too slow\n",
 				       timer->timer_name,
 				       us2ms(now - expire));
 	} else if ((expire - now) > ms2us(5000)) {

@@ -105,7 +105,7 @@ START_TEST(event_conversion_device_notify)
 					   EV_KEY, BTN_MIDDLE,
 					   EV_KEY, BTN_LEFT,
 					   -1, -1);
-	li = libinput_path_create_context(&simple_interface, NULL);
+	li = litest_create_context();
 	litest_restore_log_handler(li); /* use the default litest handler */
 	libinput_path_add_device(li, libevdev_uinput_get_devnode(uinput));
 
@@ -144,7 +144,7 @@ START_TEST(event_conversion_device_notify)
 		libinput_event_destroy(event);
 	}
 
-	libinput_unref(li);
+	litest_destroy_context(li);
 	libevdev_uinput_destroy(uinput);
 
 	ck_assert_int_gt(device_added, 0);
@@ -660,7 +660,7 @@ static void timer_offset_warning(struct libinput *libinput,
 	int *warning_triggered = (int*)libinput_get_user_data(libinput);
 
 	if (priority == LIBINPUT_LOG_PRIORITY_ERROR &&
-	    strstr(format, "offset negative"))
+	    strstr(format, "scheduled expiry is in the past"))
 		(*warning_triggered)++;
 }
 
@@ -669,6 +669,7 @@ START_TEST(timer_offset_bug_warning)
 	struct litest_device *dev = litest_current_device();
 	struct libinput *li = dev->libinput;
 	int warning_triggered = 0;
+	void *old_user_data;
 
 	litest_enable_tap(dev->libinput_device);
 	litest_drain_events(li);
@@ -678,6 +679,7 @@ START_TEST(timer_offset_bug_warning)
 
 	litest_timeout_tap();
 
+	old_user_data = libinput_get_user_data(li);
 	libinput_set_user_data(li, &warning_triggered);
 	libinput_log_set_handler(li, timer_offset_warning);
 	libinput_dispatch(li);
@@ -685,6 +687,49 @@ START_TEST(timer_offset_bug_warning)
 	/* triggered for touch down and touch up */
 	ck_assert_int_eq(warning_triggered, 2);
 	litest_restore_log_handler(li);
+
+	libinput_set_user_data(li, old_user_data);
+}
+END_TEST
+
+static void timer_delay_warning(struct libinput *libinput,
+				enum libinput_log_priority priority,
+				const char *format,
+				va_list args)
+{
+	int *warning_triggered = (int*)libinput_get_user_data(libinput);
+
+	if (priority == LIBINPUT_LOG_PRIORITY_ERROR &&
+	    strstr(format, "event processing lagging behind by"))
+		(*warning_triggered)++;
+}
+
+
+START_TEST(timer_delay_bug_warning)
+{
+	struct litest_device *dev = litest_current_device();
+	struct libinput *li = dev->libinput;
+	int warning_triggered = 0;
+	void *old_user_data;
+
+	old_user_data = libinput_get_user_data(li);
+	litest_drain_events(li);
+
+	for (int i = 0; i < 10; i++) {
+		litest_button_click(dev, BTN_LEFT, true);
+		libinput_dispatch(li);
+		litest_button_click(dev, BTN_LEFT, false);
+		msleep(11);
+
+		libinput_set_user_data(li, &warning_triggered);
+		libinput_log_set_handler(li, timer_delay_warning);
+		libinput_dispatch(li);
+	}
+
+
+	ck_assert_int_ge(warning_triggered, 1);
+	litest_restore_log_handler(li);
+	libinput_set_user_data(li, old_user_data);
 }
 END_TEST
 
@@ -726,7 +771,7 @@ START_TEST(timer_flush)
 	libinput_dispatch(li);
 	litest_assert_only_typed_events(li, LIBINPUT_EVENT_KEYBOARD_KEY);
 
-	/* Ingore 'timer offset negative' warnings */
+	/* Ignore 'timer offset negative' warnings */
 	litest_disable_log_handler(li);
 
 	/* now mess with the timing
@@ -756,7 +801,86 @@ START_TEST(timer_flush)
 
 	litest_delete_device(keyboard);
 	litest_delete_device(touchpad);
-	libinput_unref(li);
+
+	litest_destroy_context(li);
+}
+END_TEST
+
+START_TEST(udev_absinfo_override)
+{
+	struct litest_device *dev = litest_current_device();
+	struct libevdev *evdev = dev->evdev;
+	const struct input_absinfo *abs;
+	struct udev_device *ud;
+	struct udev_list_entry *entry;
+	bool found_x = false, found_y = false,
+	     found_mt_x = false, found_mt_y = false;
+
+	ud = libinput_device_get_udev_device(dev->libinput_device);
+	ck_assert_notnull(ud);
+
+	/* Custom checks for this special litest device only */
+
+	entry = udev_device_get_properties_list_entry(ud);
+	while (entry) {
+		const char *key, *value;
+
+		key = udev_list_entry_get_name(entry);
+		value = udev_list_entry_get_value(entry);
+
+		if (streq(key, "EVDEV_ABS_00")) {
+			found_x = true;
+			ck_assert(streq(value, "1:1000:100:10"));
+		}
+		if (streq(key, "EVDEV_ABS_01")) {
+			found_y = true;
+			ck_assert(streq(value, "2:2000:200:20"));
+		}
+		if (streq(key, "EVDEV_ABS_35")) {
+			found_mt_x = true;
+			ck_assert(streq(value, "3:3000:300:30"));
+		}
+		if (streq(key, "EVDEV_ABS_36")) {
+			found_mt_y = true;
+			ck_assert(streq(value, "4:4000:400:40"));
+		}
+
+		entry = udev_list_entry_get_next(entry);
+	}
+	udev_device_unref(ud);
+
+	ck_assert(found_x);
+	ck_assert(found_y);
+	ck_assert(found_mt_x);
+	ck_assert(found_mt_y);
+
+	abs = libevdev_get_abs_info(evdev, ABS_X);
+	ck_assert_int_eq(abs->minimum, 1);
+	ck_assert_int_eq(abs->maximum, 1000);
+	ck_assert_int_eq(abs->resolution, 100);
+	/* if everything goes well, we override the fuzz to 0 */
+	ck_assert_int_eq(abs->fuzz, 0);
+
+	abs = libevdev_get_abs_info(evdev, ABS_Y);
+	ck_assert_int_eq(abs->minimum, 2);
+	ck_assert_int_eq(abs->maximum, 2000);
+	ck_assert_int_eq(abs->resolution, 200);
+	/* if everything goes well, we override the fuzz to 0 */
+	ck_assert_int_eq(abs->fuzz, 0);
+
+	abs = libevdev_get_abs_info(evdev, ABS_MT_POSITION_X);
+	ck_assert_int_eq(abs->minimum, 3);
+	ck_assert_int_eq(abs->maximum, 3000);
+	ck_assert_int_eq(abs->resolution, 300);
+	/* if everything goes well, we override the fuzz to 0 */
+	ck_assert_int_eq(abs->fuzz, 0);
+
+	abs = libevdev_get_abs_info(evdev, ABS_MT_POSITION_Y);
+	ck_assert_int_eq(abs->minimum, 4);
+	ck_assert_int_eq(abs->maximum, 4000);
+	ck_assert_int_eq(abs->resolution, 400);
+	/* if everything goes well, we override the fuzz to 0 */
+	ck_assert_int_eq(abs->fuzz, 0);
 }
 END_TEST
 
@@ -777,7 +901,10 @@ TEST_COLLECTION(misc)
 	litest_add_deviceless("config:status string", config_status_string);
 
 	litest_add_for_device("timer:offset-warning", timer_offset_bug_warning, LITEST_SYNAPTICS_TOUCHPAD);
+	litest_add_for_device("timer:delay-warning", timer_delay_bug_warning, LITEST_MOUSE);
 	litest_add_no_device("timer:flush", timer_flush);
 
 	litest_add_no_device("misc:fd", fd_no_event_leak);
+
+	litest_add_for_device("misc:system", udev_absinfo_override, LITEST_ABSINFO_OVERRIDE);
 }

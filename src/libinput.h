@@ -272,6 +272,10 @@ enum libinput_pointer_axis_source {
 	 * The event is caused by the tilting of a mouse wheel rather than
 	 * its rotation. This method is commonly used on mice without
 	 * separate horizontal scroll wheels.
+	 *
+	 * @deprecated This axis source is deprecated as of libinput 1.16.
+	 * It was never used by any device before libinput 1.16. All wheel
+	 * tilt devices use @ref LIBINPUT_POINTER_AXIS_SOURCE_WHEEL instead.
 	 */
 	LIBINPUT_POINTER_AXIS_SOURCE_WHEEL_TILT,
 };
@@ -1472,14 +1476,8 @@ libinput_event_pointer_get_axis_value(struct libinput_event_pointer *event,
  * The coordinate system is identical to the cursor movement, i.e. a
  * scroll value of 1 represents the equivalent relative motion of 1.
  *
- * If the source is @ref LIBINPUT_POINTER_AXIS_SOURCE_WHEEL_TILT, no
- * terminating event is guaranteed (though it may happen).
- * Scrolling is in discrete steps and there is no physical equivalent for
- * the value returned here. For backwards compatibility, the value returned
- * by this function is identical to a single mouse wheel rotation by this
- * device (see the documentation for @ref LIBINPUT_POINTER_AXIS_SOURCE_WHEEL
- * above). Callers should not use this value but instead exclusively refer
- * to the value returned by libinput_event_pointer_get_axis_value_discrete().
+ * @deprecated The source @ref LIBINPUT_POINTER_AXIS_SOURCE_WHEEL_TILT is
+ * deprecated as of libinput 1.16. No device has ever sent this source.
  *
  * For pointer events that are not of type @ref LIBINPUT_EVENT_POINTER_AXIS,
  * this function returns 0.
@@ -4562,10 +4560,9 @@ enum libinput_config_drag_state {
  * @ingroup config
  *
  * Enable or disable tap-and-drag on this device. When enabled, a
- * single-finger tap immediately followed by a finger down results in a
- * button down event, subsequent finger motion thus triggers a drag. The
- * button is released on finger up. See the libinput documentation for more
- * details.
+ * tap immediately followed by a finger down results in a button down event,
+ * subsequent finger motion thus triggers a drag. The button is released
+ * on finger up. See the libinput documentation for more details.
  *
  * @param device The device to configure
  * @param enable @ref LIBINPUT_CONFIG_DRAG_ENABLED to enable, @ref
@@ -5055,7 +5052,7 @@ libinput_device_config_accel_get_profiles(struct libinput_device *device);
  * mode.
  *
  * @param device The device to configure
- * @param mode The mode to set the device to.
+ * @param profile The profile to set the device to.
  *
  * @return A config status code
  *
@@ -5063,7 +5060,7 @@ libinput_device_config_accel_get_profiles(struct libinput_device *device);
  */
 enum libinput_config_status
 libinput_device_config_accel_set_profile(struct libinput_device *device,
-					 enum libinput_config_accel_profile mode);
+					 enum libinput_config_accel_profile profile);
 
 /**
  * @ingroup config

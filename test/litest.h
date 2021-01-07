@@ -300,6 +300,13 @@ enum litest_device_type {
 	LITEST_DELL_CANVAS_TOTEM,
 	LITEST_DELL_CANVAS_TOTEM_TOUCH,
 	LITEST_WACOM_ISDV4_4200_PEN,
+	LITEST_ALPS_3FG,
+	LITEST_ELAN_TABLET,
+	LITEST_ABSINFO_OVERRIDE,
+	LITEST_TABLET_MODE_UNRELIABLE,
+	LITEST_KEYBOARD_LOGITECH_MEDIA_KEYBOARD_ELITE,
+	LITEST_SONY_VAIO_KEYS,
+	LITEST_KEYBOARD_QUIRKED,
 };
 
 #define LITEST_DEVICELESS	-2
@@ -337,6 +344,7 @@ enum litest_device_type {
 #define LITEST_TOOL_MOUSE	bit(29)
 #define LITEST_DIRECT		bit(30)
 #define LITEST_TOTEM		bit(31)
+#define LITEST_FORCED_PROXOUT	bit(32)
 
 /* this is a semi-mt device, so we keep track of the touches that the tests
  * send and modify them so that the first touch is always slot 0 and sends
@@ -415,6 +423,7 @@ struct range {
 };
 
 struct libinput *litest_create_context(void);
+void litest_destroy_context(struct libinput *li);
 void litest_disable_log_handler(struct libinput *libinput);
 void litest_restore_log_handler(struct libinput *libinput);
 void litest_set_log_handler_bug(struct libinput *libinput);
@@ -508,6 +517,12 @@ struct litest_device *
 litest_current_device(void);
 
 void
+litest_grab_device(struct litest_device *d);
+
+void
+litest_ungrab_device(struct litest_device *d);
+
+void
 litest_delete_device(struct litest_device *d);
 
 void
@@ -588,6 +603,10 @@ litest_touch_move_three_touches(struct litest_device *d,
 				double x2, double y2,
 				double dx, double dy,
 				int steps);
+
+void
+litest_tablet_set_tool_type(struct litest_device *d,
+			    unsigned int code);
 
 void
 litest_tablet_proximity_in(struct litest_device *d,
@@ -760,6 +779,10 @@ struct libinput_event_switch *
 litest_is_switch_event(struct libinput_event *event,
 		       enum libinput_switch sw,
 		       enum libinput_switch_state state);
+
+struct libinput_event_tablet_tool *
+litest_is_proximity_event(struct libinput_event *event,
+			  enum libinput_tablet_tool_proximity_state state);
 
 void
 litest_assert_key_event(struct libinput *li, unsigned int key,
@@ -1147,6 +1170,36 @@ litest_send_file(int sock, int fd)
 	int n = read(fd, buf, 40960);
 	litest_assert_int_gt(n, 0);
 	return write(sock, buf, n);
+}
+
+static inline int litest_slot_count(struct litest_device *dev)
+{
+	if (dev->which == LITEST_ALPS_3FG)
+		return 2;
+
+	return libevdev_get_num_slots(dev->evdev);
+}
+
+static inline bool
+litest_has_palm_detect_size(struct litest_device *dev)
+{
+	double width, height;
+	unsigned int vendor;
+	unsigned int bustype;
+	int rc;
+
+	vendor = libinput_device_get_id_vendor(dev->libinput_device);
+	bustype = libevdev_get_id_bustype(dev->evdev);
+	if (vendor == VENDOR_ID_WACOM)
+		return 0;
+	if (bustype == BUS_BLUETOOTH)
+		return 0;
+	if (vendor == VENDOR_ID_APPLE)
+		return 1;
+
+	rc = libinput_device_get_size(dev->libinput_device, &width, &height);
+
+	return rc == 0 && width >= 70;
 }
 
 #endif /* LITEST_H */

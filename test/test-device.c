@@ -164,7 +164,7 @@ START_TEST(device_disable)
 	ck_assert_int_eq(status, LIBINPUT_CONFIG_STATUS_SUCCESS);
 	litest_assert_empty_queue(li);
 
-	/* event from renabled device */
+	/* event from re-enabled device */
 	litest_event(dev, EV_REL, REL_X, 10);
 	litest_event(dev, EV_SYN, SYN_REPORT, 0);
 
@@ -176,6 +176,46 @@ START_TEST(device_disable)
 	libinput_event_destroy(event);
 
 	litest_delete_device(tmp);
+}
+END_TEST
+
+START_TEST(device_disable_tablet)
+{
+	struct litest_device *dev = litest_current_device();
+	struct libinput *li = dev->libinput;
+	struct libinput_device *device;
+	enum libinput_config_status status;
+	struct axis_replacement axes[] = {
+		{ ABS_DISTANCE, 10 },
+		{ ABS_PRESSURE, 0 },
+		{ -1, -1 }
+	};
+
+	device = dev->libinput_device;
+
+	litest_drain_events(li);
+
+	status = libinput_device_config_send_events_set_mode(device,
+			LIBINPUT_CONFIG_SEND_EVENTS_DISABLED);
+	ck_assert_int_eq(status, LIBINPUT_CONFIG_STATUS_SUCCESS);
+
+	/* no event from disabling */
+	litest_assert_empty_queue(li);
+
+	litest_tablet_proximity_in(dev, 60, 60, axes);
+	for (int i = 60; i < 70; i++) {
+		litest_tablet_motion(dev, i, i, axes);
+		libinput_dispatch(li);
+	}
+	litest_tablet_proximity_out(dev);
+
+	litest_assert_empty_queue(li);
+
+	/* no event from resuming */
+	status = libinput_device_config_send_events_set_mode(device,
+			LIBINPUT_CONFIG_SEND_EVENTS_ENABLED);
+	ck_assert_int_eq(status, LIBINPUT_CONFIG_STATUS_SUCCESS);
+	litest_assert_empty_queue(li);
 }
 END_TEST
 
@@ -414,7 +454,7 @@ START_TEST(device_reenable_syspath_changed)
 
 	litest_delete_device(litest_device);
 	libinput_device_unref(device1);
-	libinput_unref(li);
+	litest_destroy_context(li);
 }
 END_TEST
 
@@ -448,7 +488,7 @@ START_TEST(device_reenable_device_removed)
 	litest_assert_empty_queue(li);
 
 	libinput_device_unref(device);
-	libinput_unref(li);
+	litest_destroy_context(li);
 }
 END_TEST
 
@@ -759,22 +799,6 @@ START_TEST(device_user_data)
 }
 END_TEST
 
-static int open_restricted(const char *path, int flags, void *data)
-{
-	int fd;
-	fd = open(path, flags);
-	return fd < 0 ? -errno : fd;
-}
-static void close_restricted(int fd, void *data)
-{
-	close(fd);
-}
-
-const struct libinput_interface simple_interface = {
-	.open_restricted = open_restricted,
-	.close_restricted = close_restricted,
-};
-
 START_TEST(device_group_get)
 {
 	struct litest_device *dev = litest_current_device();
@@ -819,7 +843,7 @@ START_TEST(device_group_ref)
 	ck_assert_notnull(libinput_device_group_unref(group));
 	ck_assert(libinput_device_group_unref(group) == NULL);
 
-	libinput_unref(li);
+	litest_destroy_context(li);
 }
 END_TEST
 
@@ -837,7 +861,7 @@ START_TEST(device_group_leak)
 					     EV_REL, REL_Y,
 					     -1);
 
-	li = libinput_path_create_context(&simple_interface, NULL);
+	li = litest_create_context();
 	device = libinput_path_add_device(li,
 					  libevdev_uinput_get_devnode(uinput));
 
@@ -847,7 +871,7 @@ START_TEST(device_group_leak)
 	libinput_path_remove_device(device);
 
 	libevdev_uinput_destroy(uinput);
-	libinput_unref(li);
+	litest_destroy_context(li);
 
 	/* the device group leaks, check valgrind */
 }
@@ -870,7 +894,7 @@ START_TEST(abs_device_no_absx)
 					  libevdev_uinput_get_devnode(uinput));
 	litest_restore_log_handler(li);
 	ck_assert(device == NULL);
-	libinput_unref(li);
+	litest_destroy_context(li);
 
 	libevdev_uinput_destroy(uinput);
 }
@@ -893,7 +917,7 @@ START_TEST(abs_device_no_absy)
 					  libevdev_uinput_get_devnode(uinput));
 	litest_restore_log_handler(li);
 	ck_assert(device == NULL);
-	libinput_unref(li);
+	litest_destroy_context(li);
 
 	libevdev_uinput_destroy(uinput);
 }
@@ -919,7 +943,7 @@ START_TEST(abs_mt_device_no_absy)
 					  libevdev_uinput_get_devnode(uinput));
 	litest_restore_log_handler(li);
 	ck_assert(device == NULL);
-	libinput_unref(li);
+	litest_destroy_context(li);
 
 	libevdev_uinput_destroy(uinput);
 }
@@ -945,7 +969,7 @@ START_TEST(abs_mt_device_no_absx)
 					  libevdev_uinput_get_devnode(uinput));
 	litest_restore_log_handler(li);
 	ck_assert(device == NULL);
-	libinput_unref(li);
+	litest_destroy_context(li);
 
 	libevdev_uinput_destroy(uinput);
 }
@@ -986,7 +1010,7 @@ START_TEST(abs_device_no_range)
 	assert_device_ignored(li, absinfo);
 
 	litest_restore_log_handler(li);
-	libinput_unref(li);
+	litest_destroy_context(li);
 }
 END_TEST
 
@@ -1014,7 +1038,7 @@ START_TEST(abs_mt_device_no_range)
 		assert_device_ignored(li, absinfo);
 
 	litest_restore_log_handler(li);
-	libinput_unref(li);
+	litest_destroy_context(li);
 }
 END_TEST
 
@@ -1038,7 +1062,7 @@ START_TEST(abs_device_missing_res)
 	assert_device_ignored(li, absinfo);
 
 	litest_restore_log_handler(li);
-	libinput_unref(li);
+	litest_destroy_context(li);
 }
 END_TEST
 
@@ -1065,7 +1089,7 @@ START_TEST(abs_mt_device_missing_res)
 	assert_device_ignored(li, absinfo);
 
 	litest_restore_log_handler(li);
-	libinput_unref(li);
+	litest_destroy_context(li);
 
 }
 END_TEST
@@ -1099,7 +1123,7 @@ START_TEST(ignore_joystick)
 	litest_assert_ptr_null(device);
 	libevdev_uinput_destroy(uinput);
 	litest_restore_log_handler(li);
-	libinput_unref(li);
+	litest_destroy_context(li);
 }
 END_TEST
 
@@ -1137,7 +1161,7 @@ START_TEST(device_accelerometer)
 	litest_assert_ptr_null(device);
 	libevdev_uinput_destroy(uinput);
 	litest_restore_log_handler(li);
-	libinput_unref(li);
+	litest_destroy_context(li);
 }
 END_TEST
 
@@ -1185,7 +1209,7 @@ START_TEST(device_nonpointer_rel)
 	}
 	litest_restore_log_handler(li);
 
-	libinput_unref(li);
+	litest_destroy_context(li);
 	libevdev_uinput_destroy(uinput);
 }
 END_TEST
@@ -1225,7 +1249,7 @@ START_TEST(device_touchpad_rel)
 		libinput_dispatch(li);
 	}
 
-	libinput_unref(li);
+	litest_destroy_context(li);
 	libevdev_uinput_destroy(uinput);
 }
 END_TEST
@@ -1266,7 +1290,7 @@ START_TEST(device_touch_rel)
 	}
 	litest_restore_log_handler(li);
 
-	libinput_unref(li);
+	litest_destroy_context(li);
 	libevdev_uinput_destroy(uinput);
 }
 END_TEST
@@ -1302,7 +1326,7 @@ START_TEST(device_abs_rel)
 		libinput_dispatch(li);
 	}
 
-	libinput_unref(li);
+	litest_destroy_context(li);
 	libevdev_uinput_destroy(uinput);
 }
 END_TEST
@@ -1395,6 +1419,95 @@ START_TEST(device_quirks_logitech_marble_mouse)
 }
 END_TEST
 
+char *debug_messages[64] = { NULL };
+
+static void
+debug_log_handler(struct libinput *libinput,
+		  enum libinput_log_priority priority,
+		  const char *format,
+		  va_list args)
+{
+	char *message;
+	int n;
+
+	if (priority != LIBINPUT_LOG_PRIORITY_DEBUG)
+		return;
+
+	n = xvasprintf(&message, format, args);
+	litest_assert_int_gt(n, 0);
+
+	for (size_t idx = 0; idx < ARRAY_LENGTH(debug_messages); idx++) {
+		if (debug_messages[idx] == NULL) {
+			debug_messages[idx] = message;
+			return;
+		}
+	}
+
+	litest_abort_msg("Out of space for debug messages");
+}
+
+START_TEST(device_quirks)
+{
+	struct libinput *li;
+	struct litest_device *dev;
+	struct libinput_device *device;
+	char **message;
+	bool disable_key_f1 = false,
+	     enable_btn_left = false;
+#if HAVE_LIBEVDEV_DISABLE_PROPERTY
+	bool disable_pointingstick = false,
+	     enable_buttonpad = false;
+#endif
+
+	li = litest_create_context();
+	libinput_log_set_priority(li, LIBINPUT_LOG_PRIORITY_DEBUG);
+	libinput_log_set_handler(li, debug_log_handler);
+	dev = litest_add_device(li, LITEST_KEYBOARD_QUIRKED);
+	device = dev->libinput_device;
+
+	ck_assert(libinput_device_pointer_has_button(device,
+						     BTN_LEFT));
+	ck_assert(libinput_device_pointer_has_button(dev->libinput_device,
+						     BTN_RIGHT));
+	ck_assert(!libinput_device_keyboard_has_key(dev->libinput_device,
+						    KEY_F1));
+	ck_assert(!libinput_device_keyboard_has_key(dev->libinput_device,
+						    KEY_F2));
+	ck_assert(!libinput_device_keyboard_has_key(dev->libinput_device,
+						    KEY_F3));
+
+	/* Scrape the debug messages for confirmation that our quirks are
+	 * triggered, the above checks cannot work non-key codes */
+	message = debug_messages;
+	while (*message) {
+		if (strstr(*message, "disabling EV_KEY KEY_F1"))
+			disable_key_f1 = true;
+		if (strstr(*message, "enabling EV_KEY BTN_LEFT"))
+			enable_btn_left = true;
+#if HAVE_LIBEVDEV_DISABLE_PROPERTY
+		if (strstr(*message, "enabling INPUT_PROP_BUTTONPAD"))
+			enable_buttonpad = true;
+		if (strstr(*message, "disabling INPUT_PROP_POINTING_STICK"))
+			disable_pointingstick = true;
+#endif
+		free(*message);
+		message++;
+	}
+
+	ck_assert(disable_key_f1);
+	ck_assert(enable_btn_left);
+#if HAVE_LIBEVDEV_DISABLE_PROPERTY
+	ck_assert(enable_buttonpad);
+	ck_assert(disable_pointingstick);
+#endif
+
+	litest_disable_log_handler(li);
+
+	litest_delete_device(dev);
+	litest_destroy_context(li);
+}
+END_TEST
+
 START_TEST(device_capability_at_least_one)
 {
 	struct litest_device *dev = litest_current_device();
@@ -1429,6 +1542,28 @@ START_TEST(device_capability_check_invalid)
 	ck_assert(!libinput_device_has_capability(device, 7));
 	ck_assert(!libinput_device_has_capability(device, 0xffff));
 
+}
+END_TEST
+
+START_TEST(device_capability_nocaps_ignored)
+{
+	struct libevdev_uinput *uinput;
+	struct libinput *li;
+	struct libinput_device *device;
+
+	/* SW_PEN_INSERTED isn't handled in libinput so the device is
+	 * processed but ends up without seat capabilities and is ignored.
+	 */
+	uinput = litest_create_uinput_device("test device", NULL,
+					     EV_SW, SW_PEN_INSERTED,
+					     -1);
+	li = litest_create_context();
+	device = libinput_path_add_device(li,
+					  libevdev_uinput_get_devnode(uinput));
+	litest_assert_ptr_null(device);
+
+	litest_destroy_context(li);
+	libevdev_uinput_destroy(uinput);
 }
 END_TEST
 
@@ -1556,7 +1691,7 @@ START_TEST(device_button_down_remove)
 			libinput_event_destroy(event);
 		}
 
-		libinput_unref(li);
+		litest_destroy_context(li);
 		ck_assert_int_eq(have_down, have_up);
 	}
 }
@@ -1573,6 +1708,7 @@ TEST_COLLECTION(device)
 	litest_add("device:sendevents", device_sendevents_config_touchpad_superset, LITEST_TOUCHPAD, LITEST_TABLET);
 	litest_add("device:sendevents", device_sendevents_config_default, LITEST_ANY, LITEST_TABLET);
 	litest_add("device:sendevents", device_disable, LITEST_RELATIVE, LITEST_TABLET);
+	litest_add("device:sendevents", device_disable_tablet, LITEST_TABLET, LITEST_ANY);
 	litest_add("device:sendevents", device_disable_touchpad, LITEST_TOUCHPAD, LITEST_TABLET);
 	litest_add("device:sendevents", device_disable_touch, LITEST_TOUCH, LITEST_ANY);
 	litest_add("device:sendevents", device_disable_touch_during_touch, LITEST_TOUCH, LITEST_ANY);
@@ -1623,9 +1759,11 @@ TEST_COLLECTION(device)
 	litest_add_for_device("device:quirks", device_quirks_cyborg_rat_mode_button, LITEST_CYBORG_RAT);
 	litest_add_for_device("device:quirks", device_quirks_apple_magicmouse, LITEST_MAGICMOUSE);
 	litest_add_for_device("device:quirks", device_quirks_logitech_marble_mouse, LITEST_LOGITECH_TRACKBALL);
+	litest_add_no_device("device:quirks", device_quirks);
 
 	litest_add("device:capability", device_capability_at_least_one, LITEST_ANY, LITEST_ANY);
 	litest_add("device:capability", device_capability_check_invalid, LITEST_ANY, LITEST_ANY);
+	litest_add_no_device("device:capability", device_capability_nocaps_ignored);
 
 	litest_add("device:size", device_has_size, LITEST_TOUCHPAD, LITEST_ANY);
 	litest_add("device:size", device_has_size, LITEST_TABLET, LITEST_ANY);
